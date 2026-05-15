@@ -74,7 +74,10 @@ class ComponentGraphicsItem(QGraphicsItem):
                 ComponentType.LCP_SINGLE_CABLE,
                 ComponentType.LCP_THREE_CABLE,
             ):
-                self._bounding_rect = QRectF(-90, -70, 180, 145)
+                pin_ys = [pin.local_y for pin in component.pins] or [0]
+                top = min(-70, min(pin_ys) - 24)
+                bottom = max(75, max(pin_ys) + 24)
+                self._bounding_rect = QRectF(-115, top, 230, bottom - top)
             else:
                 self._bounding_rect = QRectF(-65, -50, 130, 100)
         else:

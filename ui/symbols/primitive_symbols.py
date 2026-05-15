@@ -103,10 +103,10 @@ def draw_lpm(painter, component=None):
 
 def draw_ground_component(painter, component=None):
     _setup_line_symbol(painter)
-    painter.drawLine(0, -36, 0, 0)
-    painter.drawLine(-42, 0, 42, 0)
-    painter.drawLine(-24, 12, 24, 12)
-    painter.drawLine(-10, 22, 10, 22)
+    painter.drawLine(0, -24, 0, 0)
+    painter.drawLine(-18, 0, 18, 0)
+    painter.drawLine(-11, 8, 11, 8)
+    painter.drawLine(-5, 15, 5, 15)
 
 
 def draw_subcircuit(painter, component):

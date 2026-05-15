@@ -9,6 +9,11 @@ from PySide6.QtWidgets import QApplication
 from models.circuit_model import CircuitModel, ComponentInstance, ComponentType
 from models.component_lib import create_component_pins, get_default_params
 from ui.circuit_canvas import ComponentGraphicsItem
+from ui.symbols.line_symbols import (
+    lcp_ohl_port_label,
+    lcp_single_cable_port_label,
+    lcp_three_cable_port_label,
+)
 
 
 def get_app():
@@ -178,10 +183,10 @@ class SymbolRenderingTests(unittest.TestCase):
         image = render_component(comp)
 
         self.assertGreater(non_white_pixels(image), 60)
-        self.assertTrue(has_ink_in_rect(image, 118, 50, 122, 66))
-        self.assertTrue(has_ink_in_rect(image, 80, 82, 160, 88))
+        self.assertTrue(has_ink_in_rect(image, 118, 62, 122, 82))
+        self.assertTrue(has_ink_in_rect(image, 102, 83, 138, 88))
 
-    def test_lcp_line_symbols_have_pscad_distinct_features(self):
+    def test_lcp_line_symbols_render_as_labeled_model_blocks(self):
         cases = {
             ComponentType.LCP_OHL: {"n_phases": 3, "n_gw": 1},
             ComponentType.LCP_SINGLE_CABLE: {"n_cables": 1},
@@ -206,40 +211,36 @@ class SymbolRenderingTests(unittest.TestCase):
             signatures[comp_type] = image_signature(image)
 
         self.assertEqual(len(set(signatures.values())), 3)
+        self.assertTrue(has_ink_in_rect(render_component(ComponentInstance(
+            comp_id="OHL_001",
+            comp_type=ComponentType.LCP_OHL,
+            name="TLine_1",
+            x=0,
+            y=0,
+            params=get_default_params(ComponentType.LCP_OHL) | {"n_phases": 3, "n_gw": 1},
+            pins=create_component_pins(ComponentType.LCP_OHL, 4),
+        )), 70, 45, 170, 125))
 
-        self.assertTrue(
-            has_ink_in_rect(render_component(ComponentInstance(
-                comp_id="OHL_001",
-                comp_type=ComponentType.LCP_OHL,
-                name="TLine_1",
-                x=0,
-                y=0,
-                params=get_default_params(ComponentType.LCP_OHL) | {"n_phases": 3, "n_gw": 1},
-                pins=create_component_pins(ComponentType.LCP_OHL, 4),
-            )), 116, 30, 124, 50)
+    def test_lcp_port_labels_use_chinese_terminal_names(self):
+        ohl = ComponentInstance(
+            comp_id="OHL_001",
+            comp_type=ComponentType.LCP_OHL,
+            name="TLine_1",
+            x=0,
+            y=0,
+            params=get_default_params(ComponentType.LCP_OHL) | {"n_phases": 3, "n_gw": 1},
+            pins=create_component_pins(ComponentType.LCP_OHL, 4),
         )
-        self.assertTrue(
-            has_ink_in_rect(render_component(ComponentInstance(
-                comp_id="SC_001",
-                comp_type=ComponentType.LCP_SINGLE_CABLE,
-                name="Cable_1",
-                x=0,
-                y=0,
-                params=get_default_params(ComponentType.LCP_SINGLE_CABLE) | {"n_cables": 1},
-                pins=create_component_pins(ComponentType.LCP_SINGLE_CABLE, 1),
-            )), 84, 74, 100, 96)
-        )
-        self.assertTrue(
-            has_ink_in_rect(render_component(ComponentInstance(
-                comp_id="TC_001",
-                comp_type=ComponentType.LCP_THREE_CABLE,
-                name="Cable_3",
-                x=0,
-                y=0,
-                params=get_default_params(ComponentType.LCP_THREE_CABLE),
-                pins=create_component_pins(ComponentType.LCP_THREE_CABLE, 3),
-            )), 88, 120, 155, 143)
-        )
+
+        self.assertEqual(lcp_ohl_port_label(ohl, "nk_0"), "导线1")
+        self.assertEqual(lcp_ohl_port_label(ohl, "nm_2"), "导线3")
+        self.assertEqual(lcp_ohl_port_label(ohl, "nk_3"), "地线1")
+        self.assertEqual(lcp_single_cable_port_label("nk_0_core"), "芯线1")
+        self.assertEqual(lcp_single_cable_port_label("nm_0_sheath"), "护套1")
+        self.assertEqual(lcp_single_cable_port_label("nk_0_armor"), "铠装1")
+        self.assertEqual(lcp_three_cable_port_label("nk_core_a"), "芯线A")
+        self.assertEqual(lcp_three_cable_port_label("nm_sheath_c"), "护套C")
+        self.assertEqual(lcp_three_cable_port_label("nk_pipe"), "管道")
 
 
 if __name__ == "__main__":
