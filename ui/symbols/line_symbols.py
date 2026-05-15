@@ -34,10 +34,10 @@ def _draw_terminal_tube(painter, x, y, width=58, height=13, label="C1", right=Fa
     painter.drawRoundedRect(rect, 5, 5)
     if right:
         painter.drawEllipse(x - 5, y - 5, 10, 10)
-        draw_text(painter, label, x + width + 2, y + 5, 8, QColor("#111827"))
+        draw_text(painter, label, x + width + 16, y + 5, 8, QColor("#111827"))
     else:
         painter.drawEllipse(x + width - 5, y - 5, 10, 10)
-        draw_text(painter, label, x - 22, y + 5, 8, QColor("#111827"))
+        draw_text(painter, label, x - 34, y + 5, 8, QColor("#111827"))
 
 
 def draw_bergeron(painter, component):
@@ -87,7 +87,7 @@ def draw_lcp_ohl(painter, component):
     painter.drawLine(44, -20, 52, -8)
     painter.drawLine(44, -2, 52, 10)
 
-    draw_text(painter, label, -18, 30, 9, QColor("#0000d4"))
+    draw_text(painter, label, -24, 45, 9, QColor("#0000d4"))
 
 
 def draw_lcp_single_cable(painter, component):
@@ -110,9 +110,9 @@ def draw_lcp_single_cable(painter, component):
     painter.drawLine(15, -5, 48, -5)
     painter.drawLine(18, 5, 50, 5)
 
-    draw_text(painter, "S1", -22, 4, 8, QColor("#111827"))
-    draw_text(painter, "A1", 10, 4, 8, QColor("#111827"))
-    draw_text(painter, label, -16, 24, 8, QColor("#111827"))
+    draw_text(painter, "S1", -22, 10, 8, QColor("#111827"))
+    draw_text(painter, "A1", 10, 10, 8, QColor("#111827"))
+    draw_text(painter, label, -20, 35, 8, QColor("#111827"))
 
 
 def draw_lcp_three_cable(painter, component):
@@ -125,8 +125,8 @@ def draw_lcp_three_cable(painter, component):
     for y, core, shield in zip(y_positions, names, shields):
         _draw_terminal_tube(painter, -58, y, 58, 13, core)
         _draw_terminal_tube(painter, 7, y, 58, 13, core, right=True)
-        draw_text(painter, shield, -23, y - 7, 8, QColor("#111827"))
-        draw_text(painter, shield, 27, y - 7, 8, QColor("#111827"))
+        draw_text(painter, shield, -24, y - 8, 8, QColor("#111827"))
+        draw_text(painter, shield, 26, y - 8, 8, QColor("#111827"))
 
     _draw_arrow_up(painter, 0, -54, 17, 7)
     _draw_arrow_down(painter, 0, 38, 17, 7)
@@ -147,9 +147,9 @@ def draw_lcp_three_cable(painter, component):
     painter.drawLine(34, 42, 34, 18)
     painter.drawLine(-34, 42, 34, 42)
 
-    draw_text(painter, label, -19, 3, 8, QColor("#111827"))
-    draw_text(painter, "Pipe", -43, 60, 8, QColor("#111827"))
-    draw_text(painter, "Pipe", 22, 60, 8, QColor("#111827"))
+    draw_text(painter, label, -21, 15, 8, QColor("#111827"))
+    draw_text(painter, "Pipe", -52, 65, 8, QColor("#111827"))
+    draw_text(painter, "Pipe", 34, 65, 8, QColor("#111827"))
 
 
 def draw_lcp_cable(painter, component, label):

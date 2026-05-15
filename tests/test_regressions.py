@@ -464,6 +464,22 @@ class RegressionTests(unittest.TestCase):
         finally:
             canvas.close()
 
+    def test_lcp_symbol_pins_use_wide_port_columns(self):
+        cases = [
+            (ComponentType.LCP_OHL, 4, {"n_phases": 3, "n_gw": 1}),
+            (ComponentType.LCP_SINGLE_CABLE, 1, {"n_cables": 1}),
+            (ComponentType.LCP_THREE_CABLE, 3, {}),
+        ]
+
+        for comp_type, pin_count, overrides in cases:
+            with self.subTest(comp_type=comp_type):
+                params = get_default_params(comp_type) | overrides
+                pins = create_component_pins(comp_type, pin_count, params=params)
+                xs = [pin.local_x for pin in pins]
+
+                self.assertLessEqual(min(xs), -70)
+                self.assertGreaterEqual(max(xs), 70)
+
     def test_lcp_single_core_cable_uses_kernel_api_and_clean_config(self):
         model = CircuitModel()
         params = get_default_params(ComponentType.LCP_SINGLE_CABLE) | {

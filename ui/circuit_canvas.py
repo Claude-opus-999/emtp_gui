@@ -69,7 +69,14 @@ class ComponentGraphicsItem(QGraphicsItem):
             ComponentType.LCP_SINGLE_CABLE,
             ComponentType.LCP_THREE_CABLE,
         ):
-            self._bounding_rect = QRectF(-65, -50, 130, 100)
+            if component.comp_type in (
+                ComponentType.LCP_OHL,
+                ComponentType.LCP_SINGLE_CABLE,
+                ComponentType.LCP_THREE_CABLE,
+            ):
+                self._bounding_rect = QRectF(-90, -70, 180, 145)
+            else:
+                self._bounding_rect = QRectF(-65, -50, 130, 100)
         else:
             self._bounding_rect = QRectF(-40, -25, 80, 50)
 

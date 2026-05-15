@@ -102,7 +102,7 @@ def get_pins(
         return PINS['voltage_source']
     elif comp_type == ComponentType.BERGERON:
         return PINS['bergeron']
-    elif comp_type in (ComponentType.ULM, ComponentType.LCP_OHL):
+    elif comp_type == ComponentType.ULM:
         if n_phases == 1:
             return PINS['ulm_single']
         else:
@@ -115,6 +115,16 @@ def get_pins(
                 pins.append({'name': f'nk_{i}', 'local_x': -30, 'local_y': y})
                 pins.append({'name': f'nm_{i}', 'local_x': 30, 'local_y': y})
             return pins
+    elif comp_type == ComponentType.LCP_OHL:
+        n_lines = max(1, n_phases)
+        spacing = 15
+        start_y = -(n_lines - 1) * spacing / 2
+        pins = []
+        for i in range(n_lines):
+            y = start_y + i * spacing
+            pins.append({'name': f'nk_{i}', 'local_x': -72, 'local_y': y})
+            pins.append({'name': f'nm_{i}', 'local_x': 72, 'local_y': y})
+        return pins
     elif comp_type == ComponentType.LCP_SINGLE_CABLE:
         # 每根电缆 3 导体 (core/sheath/armor) × 电缆数
         n_cables = max(1, n_phases)
@@ -124,8 +134,8 @@ def get_pins(
         for i in range(n_cables):
             for j, conductor in enumerate(['core', 'sheath', 'armor']):
                 y = start_y + (i * 3 + j) * spacing
-                pins.append({'name': f'nk_{i}_{conductor}', 'local_x': -30, 'local_y': y})
-                pins.append({'name': f'nm_{i}_{conductor}', 'local_x': 30, 'local_y': y})
+                pins.append({'name': f'nk_{i}_{conductor}', 'local_x': -72, 'local_y': y})
+                pins.append({'name': f'nm_{i}_{conductor}', 'local_x': 72, 'local_y': y})
         return pins
     elif comp_type == ComponentType.LCP_THREE_CABLE:
         # 7 导体 (3 core + 3 sheath + pipe)
@@ -135,8 +145,8 @@ def get_pins(
         pins = []
         for j, cn in enumerate(conductor_names):
             y = start_y + j * spacing
-            pins.append({'name': f'nk_{cn}', 'local_x': -30, 'local_y': y})
-            pins.append({'name': f'nm_{cn}', 'local_x': 30, 'local_y': y})
+            pins.append({'name': f'nk_{cn}', 'local_x': -72, 'local_y': y})
+            pins.append({'name': f'nm_{cn}', 'local_x': 72, 'local_y': y})
         return pins
     elif comp_type == ComponentType.MOA:
         return PINS['moa']
