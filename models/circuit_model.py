@@ -28,6 +28,7 @@ class ComponentType(Enum):
     UMEC_TRANSFORMER = "UMEC"      # 新增：UMEC变压器
     PROBE = "PRB"                  # 新增：探针（画布元件）
     GROUND = "GND"
+    JUNCTION = "JUNC"
     SUBCIRCUIT = "SUB"             # 新增：子电路
 
 

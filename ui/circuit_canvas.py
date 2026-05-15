@@ -12,7 +12,8 @@ from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QGraphicsItem,
                               QGraphicsPathItem, QApplication)
 from PySide6.QtCore import Qt, QPointF, Signal, QRectF, QLineF, QPoint
 from PySide6.QtGui import (QPen, QBrush, QColor, QPainter, QPainterPath,
-                           QFont, QKeyEvent, QMouseEvent, QWheelEvent)
+                           QPainterPathStroker, QFont, QKeyEvent,
+                           QMouseEvent, QWheelEvent)
 from enum import Enum, auto
 from typing import Optional, Dict, List, Tuple
 import math
@@ -62,6 +63,8 @@ class ComponentGraphicsItem(QGraphicsItem):
             self._bounding_rect = QRectF(-100, -75, 200, 160)
         elif component.comp_type == ComponentType.PROBE:
             self._bounding_rect = QRectF(-45, -45, 90, 100)
+        elif component.comp_type == ComponentType.JUNCTION:
+            self._bounding_rect = QRectF(-8, -8, 16, 16)
         elif component.comp_type in (
             ComponentType.BERGERON,
             ComponentType.ULM,
@@ -136,14 +139,15 @@ class ComponentGraphicsItem(QGraphicsItem):
             painter.drawRect(-25, -15, 50, 30)
 
         # 绘制标签
-        if ct != ComponentType.UMEC_TRANSFORMER:
+        if ct not in (ComponentType.UMEC_TRANSFORMER, ComponentType.JUNCTION):
             painter.setPen(QColor("#1e2a3a"))
             font = QFont("Arial", 9)
             painter.setFont(font)
             painter.drawText(QPointF(-15, 35), self.component.name)
 
         # 绘制引脚
-        self._draw_pins(painter)
+        if ct != ComponentType.JUNCTION:
+            self._draw_pins(painter)
 
         if self.isSelected():
             painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -544,6 +548,13 @@ class WireGraphicsItem(QGraphicsItem):
 
     def _manhattan_points(self) -> list:
         """计算 Manhattan 折线路径的关键点列表（只含水平/垂直线段）"""
+        if self.wire.waypoints:
+            return [
+                self.start_pos,
+                *[QPointF(float(x), float(y)) for x, y in self.wire.waypoints],
+                self.end_pos,
+            ]
+
         sx, sy = self.start_pos.x(), self.start_pos.y()
         ex, ey = self.end_pos.x(), self.end_pos.y()
 
@@ -559,6 +570,58 @@ class WireGraphicsItem(QGraphicsItem):
             QPointF(mid_x, ey),   # 垂直段终点
             self.end_pos,
         ]
+
+    def _path(self) -> QPainterPath:
+        pts = self._manhattan_points()
+        path = QPainterPath()
+        if not pts:
+            return path
+        path.moveTo(pts[0])
+        for point in pts[1:]:
+            path.lineTo(point)
+        return path
+
+    def shape(self) -> QPainterPath:
+        stroker = QPainterPathStroker()
+        stroker.setWidth(12)
+        return stroker.createStroke(self._path())
+
+    @staticmethod
+    def _distance_to_segment(pos: QPointF, start: QPointF, end: QPointF) -> Tuple[float, QPointF]:
+        dx = end.x() - start.x()
+        dy = end.y() - start.y()
+        length_sq = dx * dx + dy * dy
+        if length_sq == 0:
+            return math.hypot(pos.x() - start.x(), pos.y() - start.y()), QPointF(start)
+        t = (
+            (pos.x() - start.x()) * dx + (pos.y() - start.y()) * dy
+        ) / length_sq
+        t = max(0.0, min(1.0, t))
+        nearest = QPointF(start.x() + t * dx, start.y() + t * dy)
+        distance = math.hypot(pos.x() - nearest.x(), pos.y() - nearest.y())
+        return distance, nearest
+
+    def distance_to_point(self, pos: QPointF) -> float:
+        pts = self._manhattan_points()
+        if len(pts) < 2:
+            return math.inf
+        return min(
+            self._distance_to_segment(pos, pts[i], pts[i + 1])[0]
+            for i in range(len(pts) - 1)
+        )
+
+    def nearest_point(self, pos: QPointF) -> QPointF:
+        pts = self._manhattan_points()
+        if len(pts) < 2:
+            return QPointF(pos)
+        nearest = min(
+            (
+                self._distance_to_segment(pos, pts[i], pts[i + 1])
+                for i in range(len(pts) - 1)
+            ),
+            key=lambda item: item[0],
+        )
+        return nearest[1]
 
     def _update_bounds(self):
         self.prepareGeometryChange()
@@ -658,6 +721,7 @@ class CircuitCanvas(QGraphicsView):
         self._placing_type: Optional[ComponentType] = None
         self._placing_params: Dict[str, object] = {}
         self._wiring_start: Optional[Tuple[str, str]] = None  # (comp_id, pin_name)
+        self._wire_waypoints: List[QPointF] = []
         self._temp_line: Optional[WireGraphicsItem] = None
         self._middle_panning = False
         self._middle_pan_last_pos: Optional[QPoint] = None
@@ -823,6 +887,11 @@ class CircuitCanvas(QGraphicsView):
             event.accept()
             return
 
+        if self.mode == CanvasMode.WIRE and event.button() == Qt.MouseButton.RightButton:
+            self._handle_wire_right_click(self.mapToScene(event.pos()))
+            event.accept()
+            return
+
         if event.button() == Qt.LeftButton:
             scene_pos = self.mapToScene(event.pos())
 
@@ -830,14 +899,9 @@ class CircuitCanvas(QGraphicsView):
                 pos = self.snap_to_grid(scene_pos)
                 self._place_component(pos)
             elif self.mode == CanvasMode.WIRE:
-                # 拖动式连线：按下时检测是否在引脚上
-                pin_info = self.get_pin_at(scene_pos)
-                if pin_info:
-                    self._start_wire_drag(pin_info, scene_pos)
-                    # 必须调用 super 让 Qt 追踪鼠标按下状态，否则 mouseMoveEvent 收不到
-                    super().mousePressEvent(event)
-                else:
-                    super().mousePressEvent(event)
+                self._handle_wire_left_click(scene_pos)
+                event.accept()
+                return
             elif self.mode == CanvasMode.DELETE:
                 pos = self.snap_to_grid(scene_pos)
                 self._handle_delete_click(pos)
@@ -863,9 +927,11 @@ class CircuitCanvas(QGraphicsView):
             event.accept()
             return
 
-        if self.mode == CanvasMode.WIRE and self._wiring_start:
+        if self.mode == CanvasMode.WIRE and self._wiring_start and self._temp_line:
             scene_pos = self.mapToScene(event.pos())
             self._temp_line.update_positions(end_pos=scene_pos)
+            event.accept()
+            return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -882,13 +948,8 @@ class CircuitCanvas(QGraphicsView):
             event.accept()
             return
 
-        if event.button() == Qt.LeftButton and self.mode == CanvasMode.WIRE and self._wiring_start:
-            scene_pos = self.mapToScene(event.pos())
-            pin_info = self.get_pin_at(scene_pos)
-            if pin_info:
-                self._complete_wire_drag(pin_info)
-            else:
-                self._cancel_wire_drag()
+        if event.button() == Qt.LeftButton and self.mode == CanvasMode.WIRE:
+            event.accept()
             return
         super().mouseReleaseEvent(event)
 
@@ -933,10 +994,201 @@ class CircuitCanvas(QGraphicsView):
         self._placing_params = {}
         self.placement_completed.emit()  # 通知主窗口更新按钮状态
 
+    def _handle_wire_left_click(self, scene_pos: QPointF):
+        """PSCAD-style wire input: left click starts or adds a waypoint."""
+        pin_info = self.get_pin_at(scene_pos)
+        if self._wiring_start is None:
+            if pin_info:
+                self._start_wire_drag(pin_info, scene_pos)
+            return
+
+        waypoint = self.snap_to_grid(scene_pos)
+        self._wire_waypoints.append(waypoint)
+        self._update_temp_wire(waypoint)
+
+    def _handle_wire_right_click(self, scene_pos: QPointF):
+        """PSCAD-style wire input: right click finishes on a pin/wire or cancels."""
+        if self._wiring_start is None:
+            return
+
+        pin_info = self.get_pin_at(scene_pos)
+        if pin_info:
+            self._complete_wire_drag(pin_info)
+            return
+
+        wire_item = self.get_wire_at(scene_pos)
+        if wire_item:
+            self._complete_wire_to_existing_wire(wire_item, scene_pos)
+            return
+
+        self._cancel_wire_drag()
+
+    def _update_temp_wire(self, end_pos: QPointF):
+        if not self._temp_line:
+            return
+        self._temp_line.wire.waypoints = self._wire_waypoint_tuples()
+        self._temp_line.update_positions(end_pos=end_pos)
+
+    def get_wire_at(self, pos: QPointF, tolerance: float = 10.0) -> Optional[WireGraphicsItem]:
+        best_item = None
+        best_dist = tolerance
+        for item in self.wire_items.values():
+            dist = item.distance_to_point(pos)
+            if dist <= best_dist:
+                best_item = item
+                best_dist = dist
+        return best_item
+
+    @staticmethod
+    def _point_tuple(point: QPointF) -> tuple:
+        return (float(point.x()), float(point.y()))
+
+    def _wire_waypoint_tuples(self) -> List[tuple]:
+        return [self._point_tuple(point) for point in self._wire_waypoints]
+
+    def _add_wire_between(
+        self,
+        start_comp_id: str,
+        start_pin: str,
+        end_comp_id: str,
+        end_pin: str,
+        waypoints: Optional[List[tuple]] = None,
+    ) -> Optional[Wire]:
+        if start_comp_id == end_comp_id:
+            return None
+
+        for existing in self.model.wires.values():
+            same_direction = (
+                existing.from_comp == start_comp_id
+                and existing.from_pin == start_pin
+                and existing.to_comp == end_comp_id
+                and existing.to_pin == end_pin
+            )
+            reverse_direction = (
+                existing.from_comp == end_comp_id
+                and existing.from_pin == end_pin
+                and existing.to_comp == start_comp_id
+                and existing.to_pin == start_pin
+            )
+            if same_direction or reverse_direction:
+                return None
+
+        import uuid
+        wire = Wire(
+            wire_id=f"W_{uuid.uuid4().hex[:8]}",
+            from_comp=start_comp_id,
+            from_pin=start_pin,
+            to_comp=end_comp_id,
+            to_pin=end_pin,
+            waypoints=list(waypoints or []),
+        )
+        self.model.add_wire(wire)
+        if self.mode != CanvasMode.SELECT:
+            self._set_items_interactive(False)
+        return wire
+
+    def _complete_wire_to_existing_wire(self, wire_item: WireGraphicsItem, scene_pos: QPointF):
+        start_comp_id, start_pin = self._wiring_start
+        split_pos = self.snap_to_grid(wire_item.nearest_point(scene_pos))
+        first_waypoints, second_waypoints = self._split_wire_waypoints(wire_item, split_pos)
+
+        self.model._save_undo_state()
+        junction = ComponentInstance(
+            comp_id=self.model.generate_component_id(ComponentType.JUNCTION),
+            comp_type=ComponentType.JUNCTION,
+            name=f"JUNC{self.model._id_counters.get(ComponentType.JUNCTION.value, 0)}",
+            x=int(split_pos.x()),
+            y=int(split_pos.y()),
+            rotation=0,
+            params={},
+            pins=[Pin("node", 0, 0)],
+        )
+
+        import uuid
+        original = wire_item.wire
+        new_wires = [
+            Wire(
+                wire_id=f"W_{uuid.uuid4().hex[:8]}",
+                from_comp=original.from_comp,
+                from_pin=original.from_pin,
+                to_comp=junction.comp_id,
+                to_pin="node",
+                waypoints=first_waypoints,
+            ),
+            Wire(
+                wire_id=f"W_{uuid.uuid4().hex[:8]}",
+                from_comp=junction.comp_id,
+                from_pin="node",
+                to_comp=original.to_comp,
+                to_pin=original.to_pin,
+                waypoints=second_waypoints,
+            ),
+            Wire(
+                wire_id=f"W_{uuid.uuid4().hex[:8]}",
+                from_comp=start_comp_id,
+                from_pin=start_pin,
+                to_comp=junction.comp_id,
+                to_pin="node",
+                waypoints=self._wire_waypoint_tuples(),
+            ),
+        ]
+
+        self.model.components[junction.comp_id] = junction
+        self.model._sync_counter_for_component(junction)
+        self.model.wires.pop(original.wire_id, None)
+        for wire in new_wires:
+            self.model.wires[wire.wire_id] = wire
+        self._reset_wire_state()
+        self.model._notify("component_added")
+        if self.mode != CanvasMode.SELECT:
+            self._set_items_interactive(False)
+        self.wire_created.emit(start_comp_id, start_pin, junction.comp_id, "node")
+
+    def _split_wire_waypoints(self, wire_item: WireGraphicsItem, split_pos: QPointF) -> Tuple[List[tuple], List[tuple]]:
+        pts = wire_item._manhattan_points()
+        if len(pts) < 2:
+            return [], []
+
+        segment_index = min(
+            range(len(pts) - 1),
+            key=lambda i: WireGraphicsItem._distance_to_segment(split_pos, pts[i], pts[i + 1])[0],
+        )
+        first_path = self._dedupe_points([*pts[:segment_index + 1], split_pos])
+        second_path = self._dedupe_points([split_pos, *pts[segment_index + 1:]])
+        return self._path_waypoints(first_path), self._path_waypoints(second_path)
+
+    @staticmethod
+    def _dedupe_points(points: List[QPointF]) -> List[QPointF]:
+        result = []
+        for point in points:
+            if not result or (
+                abs(result[-1].x() - point.x()) > 0.1
+                or abs(result[-1].y() - point.y()) > 0.1
+            ):
+                result.append(point)
+        return result
+
+    def _path_waypoints(self, points: List[QPointF]) -> List[tuple]:
+        if len(points) <= 2:
+            return []
+        return [self._point_tuple(point) for point in points[1:-1]]
+
+    def _reset_wire_state(self):
+        if self._temp_line:
+            self.scene.removeItem(self._temp_line)
+            self._temp_line = None
+        self._wiring_start = None
+        self._wire_waypoints = []
+        self.setCursor(Qt.CrossCursor)
+
     def _start_wire_drag(self, pin_info: Tuple['ComponentGraphicsItem', str], pos: QPointF):
         """开始拖拽式连线：在引脚上按下鼠标"""
         comp_item, pin_name = pin_info
+        if self._temp_line:
+            self.scene.removeItem(self._temp_line)
+            self._temp_line = None
         self._wiring_start = (comp_item.component.comp_id, pin_name)
+        self._wire_waypoints = []
 
         pin_pos = comp_item.get_all_scene_pin_positions()[pin_name]
         self._temp_line = WireGraphicsItem(
@@ -952,12 +1204,14 @@ class CircuitCanvas(QGraphicsView):
         comp_item, pin_name = pin_info
         start_comp_id, start_pin = self._wiring_start
         end_comp_id, end_pin = comp_item.component.comp_id, pin_name
+        waypoints = self._wire_waypoint_tuples()
 
         # 清除临时线
         if self._temp_line:
             self.scene.removeItem(self._temp_line)
             self._temp_line = None
         self._wiring_start = None
+        self._wire_waypoints = []
         self.setCursor(Qt.CrossCursor)
 
         if start_comp_id == end_comp_id:
@@ -980,8 +1234,11 @@ class CircuitCanvas(QGraphicsView):
             from_pin=start_pin,
             to_comp=end_comp_id,
             to_pin=end_pin,
+            waypoints=waypoints,
         )
         self.model.add_wire(wire)
+        if self.mode != CanvasMode.SELECT:
+            self._set_items_interactive(False)
         self.wire_created.emit(start_comp_id, start_pin, end_comp_id, end_pin)
 
     def _cancel_wire_drag(self):
@@ -990,6 +1247,7 @@ class CircuitCanvas(QGraphicsView):
             self.scene.removeItem(self._temp_line)
             self._temp_line = None
         self._wiring_start = None
+        self._wire_waypoints = []
         self.setCursor(Qt.CrossCursor)
 
     def _handle_delete_click(self, pos: QPointF):
@@ -1012,6 +1270,9 @@ class CircuitCanvas(QGraphicsView):
         """右键菜单"""
         from PySide6.QtWidgets import QMenu
         scene_pos = self.mapToScene(event.pos())
+        if self.mode == CanvasMode.WIRE:
+            event.accept()
+            return
         item = self.get_component_at(scene_pos)
 
         menu = QMenu(self)

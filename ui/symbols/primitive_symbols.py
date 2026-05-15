@@ -109,6 +109,12 @@ def draw_ground_component(painter, component=None):
     painter.drawLine(-5, 15, 5, 15)
 
 
+def draw_junction(painter, component=None):
+    _setup_line_symbol(painter)
+    painter.setBrush(line_pen().color())
+    painter.drawEllipse(-4, -4, 8, 8)
+
+
 def draw_subcircuit(painter, component):
     painter.setPen(line_pen())
     painter.setBrush(no_brush())

@@ -3,7 +3,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -12,7 +12,7 @@ from core.file_io import load_project
 from core.solver_builder import SolverBuilder
 from models.circuit_model import CircuitModel, ComponentInstance, ComponentType, Pin, Wire
 from models.component_lib import create_component_pins, get_default_params
-from ui.circuit_canvas import CircuitCanvas
+from ui.circuit_canvas import CircuitCanvas, CanvasMode
 from ui.main_window import MainWindow
 
 
@@ -353,6 +353,106 @@ class RegressionTests(unittest.TestCase):
 
         canvas.close()
         app.processEvents()
+
+    def test_pscad_wire_mode_left_click_adds_waypoint_and_right_click_finishes(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            r1 = ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=-100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            r2 = ComponentInstance(
+                comp_id="R_002",
+                comp_type=ComponentType.RESISTOR,
+                name="R2",
+                x=100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            model.add_component(r1)
+            model.add_component(r2)
+            canvas.set_mode(CanvasMode.WIRE)
+
+            start = canvas.component_items["R_001"].get_all_scene_pin_positions()["nt"]
+            waypoint = QPointF(0, -50)
+            end = canvas.component_items["R_002"].get_all_scene_pin_positions()["nf"]
+
+            canvas._handle_wire_left_click(start)
+            canvas._handle_wire_left_click(waypoint)
+            canvas._handle_wire_right_click(end)
+
+            wires = list(model.wires.values())
+            self.assertEqual(len(wires), 1)
+            self.assertEqual(wires[0].from_comp, "R_001")
+            self.assertEqual(wires[0].from_pin, "nt")
+            self.assertEqual(wires[0].to_comp, "R_002")
+            self.assertEqual(wires[0].to_pin, "nf")
+            self.assertEqual(wires[0].waypoints, [(0.0, -50.0)])
+        finally:
+            canvas.close()
+
+    def test_pscad_wire_mode_can_finish_on_existing_wire_midpoint(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            r1 = ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=-100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            r2 = ComponentInstance(
+                comp_id="R_002",
+                comp_type=ComponentType.RESISTOR,
+                name="R2",
+                x=100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            r3 = ComponentInstance(
+                comp_id="R_003",
+                comp_type=ComponentType.RESISTOR,
+                name="R3",
+                x=0,
+                y=100,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            for comp in (r1, r2, r3):
+                model.add_component(comp)
+            model.add_wire(Wire("W_MAIN", "R_001", "nt", "R_002", "nf"))
+            canvas.set_mode(CanvasMode.WIRE)
+
+            start = canvas.component_items["R_003"].get_all_scene_pin_positions()["nf"]
+            midpoint = QPointF(0, 0)
+            canvas._handle_wire_left_click(start)
+            canvas._handle_wire_right_click(midpoint)
+
+            junction_type = getattr(ComponentType, "JUNCTION")
+            junctions = [
+                comp for comp in model.components.values()
+                if comp.comp_type == junction_type
+            ]
+            self.assertEqual(len(junctions), 1)
+            self.assertNotIn("W_MAIN", model.wires)
+            self.assertEqual(len(model.wires), 3)
+            self.assertGreaterEqual(
+                len([
+                    wire for wire in model.wires.values()
+                    if wire.from_comp == junctions[0].comp_id or wire.to_comp == junctions[0].comp_id
+                ]),
+                3,
+            )
+        finally:
+            canvas.close()
 
     def test_code_preview_refreshes_after_wire_change(self):
         app = get_app()

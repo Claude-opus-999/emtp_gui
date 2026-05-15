@@ -36,6 +36,9 @@ PINS = {
     'ground': [  # 接地
         {'name': 'gnd', 'local_x': 0, 'local_y': -24},
     ],
+    'junction': [
+        {'name': 'node', 'local_x': 0, 'local_y': 0},
+    ],
     'moa': [  # MOA避雷器
         {'name': 'nf', 'local_x': -30, 'local_y': 0},
         {'name': 'nt', 'local_x': 30, 'local_y': 0},
@@ -98,6 +101,8 @@ def get_pins(
     """获取指定类型的引脚定义"""
     if comp_type == ComponentType.GROUND:
         return PINS['ground']
+    elif comp_type == ComponentType.JUNCTION:
+        return PINS['junction']
     elif comp_type == ComponentType.VOLTAGE_SOURCE:
         return PINS['voltage_source']
     elif comp_type == ComponentType.BERGERON:
@@ -350,6 +355,7 @@ PARAM_TEMPLATES = {
     },
 
     ComponentType.GROUND: {},
+    ComponentType.JUNCTION: {},
 
     ComponentType.SERIES_RL: {
         'R': {
@@ -715,6 +721,15 @@ COMPONENT_REGISTRY = {
         'params_template': PARAM_TEMPLATES[ComponentType.GROUND],
         'api_method': None,
         'symbol_color': '#1e2a3a',
+    },
+
+    ComponentType.JUNCTION: {
+        'display_name': 'Junction',
+        'short_name': 'JUNC',
+        'pins': PINS['junction'],
+        'params_template': PARAM_TEMPLATES[ComponentType.JUNCTION],
+        'api_method': None,
+        'symbol_color': '#dc2626',
     },
 
     ComponentType.SERIES_RL: {
