@@ -24,6 +24,9 @@ class CodeGenerator:
 
     def generate(self, model: CircuitModel) -> str:
         """生成完整的 Python 代码"""
+        from core.solver_builder import SolverBuilder
+
+        model = SolverBuilder()._flatten_subcircuits(model)
         lines = []
         node_map = model.assign_node_ids()
 

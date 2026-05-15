@@ -29,6 +29,7 @@ class ComponentType(Enum):
     PROBE = "PRB"                  # 新增：探针（画布元件）
     GROUND = "GND"
     JUNCTION = "JUNC"
+    SUBCIRCUIT_PORT = "PORT"
     SUBCIRCUIT = "SUB"             # 新增：子电路
 
 
@@ -703,8 +704,9 @@ class CircuitModel:
                 internal_comps[cid] = self.components[cid]
 
         # 2. 收集连线：完全内部的 vs 连到外部的
+        node_map = self.assign_node_ids()
         internal_wires = {}
-        external_connections = []  # (wire_id, internal_comp, internal_pin, external_comp, external_pin)
+        boundary_groups: Dict[tuple, Dict[str, Any]] = {}
 
         for wid, wire in list(self.wires.items()):
             from_in = wire.from_comp in selected_set
@@ -712,22 +714,34 @@ class CircuitModel:
             if from_in and to_in:
                 internal_wires[wid] = wire
             elif from_in and not to_in:
-                # from 是内部的，to 是外部的
-                external_connections.append(
-                    (wid, wire.from_comp, wire.from_pin, wire.to_comp, wire.to_pin)
+                key = ("node", node_map.get((wire.from_comp, wire.from_pin)))
+                boundary_groups.setdefault(
+                    key,
+                    {
+                        "representative": (wire.from_comp, wire.from_pin),
+                        "connections": [],
+                    },
+                )["connections"].append(
+                    (wid, wire.from_comp, wire.from_pin, wire.to_comp, wire.to_pin, True)
                 )
             elif not from_in and to_in:
-                external_connections.append(
-                    (wid, wire.to_comp, wire.to_pin, wire.from_comp, wire.from_pin)
+                key = ("node", node_map.get((wire.to_comp, wire.to_pin)))
+                boundary_groups.setdefault(
+                    key,
+                    {
+                        "representative": (wire.to_comp, wire.to_pin),
+                        "connections": [],
+                    },
+                )["connections"].append(
+                    (wid, wire.to_comp, wire.to_pin, wire.from_comp, wire.from_pin, False)
                 )
 
-        # 3. 创建端口（每个外部连接生成一个端口）
+        # 3. 创建端口（每个边界电气节点生成一个内部端口节点）
         ports = []
         port_pins = []
-        for i, (wid, int_comp, int_pin, ext_comp, ext_pin) in enumerate(
-            external_connections
-        ):
-            # 判断端口在哪一侧：看外部元件相对于内部元件的位置
+        for i, group in enumerate(boundary_groups.values()):
+            int_comp, int_pin = group["representative"]
+            wid, _, _, ext_comp, ext_pin, _ = group["connections"][0]
             int_c = self.components[int_comp]
             ext_c = self.components.get(ext_comp)
             if ext_c:
@@ -741,13 +755,39 @@ class CircuitModel:
                 side = "left"
 
             port_name = f"P{i + 1}"
+            port_comp_id = f"PORT_{i + 1:03d}"
+            offset_x, offset_y = {
+                "left": (-70, 0),
+                "right": (70, 0),
+                "top": (0, -60),
+                "bottom": (0, 60),
+            }[side]
+            port_comp = ComponentInstance(
+                comp_id=port_comp_id,
+                comp_type=ComponentType.SUBCIRCUIT_PORT,
+                name=port_name,
+                x=int(int_c.x + offset_x),
+                y=int(int_c.y + offset_y),
+                rotation=0,
+                params={"port_name": port_name},
+                pins=[Pin("node", 0, 0)],
+            )
+            internal_comps[port_comp_id] = port_comp
             ports.append(SubcircuitPort(
                 port_name=port_name,
-                internal_comp_id=int_comp,
-                internal_pin_name=int_pin,
+                internal_comp_id=port_comp_id,
+                internal_pin_name="node",
                 side=side,
             ))
-            port_pins.append((wid, port_name, ext_comp, ext_pin))
+            internal_wires[f"W_{port_comp_id}"] = Wire(
+                wire_id=f"W_{port_comp_id}",
+                from_comp=port_comp_id,
+                from_pin="node",
+                to_comp=int_comp,
+                to_pin=int_pin,
+            )
+            for wid, _, _, ext_comp, ext_pin, internal_was_from in group["connections"]:
+                port_pins.append((wid, port_name, ext_comp, ext_pin, internal_was_from))
 
         if not ports:
             # 没有外部连接 → 不需要子电路封装
@@ -765,7 +805,7 @@ class CircuitModel:
         self._save_undo_state()
 
         # 移除外部连接线
-        for wid, _, _, _ in port_pins:
+        for wid, _, _, _, _ in port_pins:
             if wid in self.wires:
                 del self.wires[wid]
 
@@ -802,18 +842,24 @@ class CircuitModel:
         )
 
         # 7. 添加子电路到模型
-        self.add_subcircuit_def(subdef)
+        self.subcircuit_defs[subdef.name] = subdef
         self.components[sub_comp.comp_id] = sub_comp
 
         # 8. 重新连接外部线（从外部元件连到子电路端口引脚）
         import uuid as _uuid
-        for wid, port_name, ext_comp, ext_pin in port_pins:
+        for wid, port_name, ext_comp, ext_pin, internal_was_from in port_pins:
+            if internal_was_from:
+                from_comp, from_pin = sub_comp.comp_id, port_name
+                to_comp, to_pin = ext_comp, ext_pin
+            else:
+                from_comp, from_pin = ext_comp, ext_pin
+                to_comp, to_pin = sub_comp.comp_id, port_name
             new_wire = Wire(
                 wire_id=f"W_{_uuid.uuid4().hex[:8]}",
-                from_comp=sub_comp.comp_id,
-                from_pin=port_name,
-                to_comp=ext_comp,
-                to_pin=ext_pin,
+                from_comp=from_comp,
+                from_pin=from_pin,
+                to_comp=to_comp,
+                to_pin=to_pin,
             )
             self.wires[new_wire.wire_id] = new_wire
 

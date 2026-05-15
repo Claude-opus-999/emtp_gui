@@ -454,6 +454,271 @@ class RegressionTests(unittest.TestCase):
         finally:
             canvas.close()
 
+    def _build_subcircuit_packaging_fixture(self):
+        model = CircuitModel()
+        components = [
+            ComponentInstance(
+                comp_id="VS_001",
+                comp_type=ComponentType.VOLTAGE_SOURCE,
+                name="VS1",
+                x=-220,
+                y=0,
+                pins=create_component_pins(ComponentType.VOLTAGE_SOURCE),
+            ),
+            ComponentInstance(
+                comp_id="R_TAP",
+                comp_type=ComponentType.RESISTOR,
+                name="RTAP",
+                x=-220,
+                y=80,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            ),
+            ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=-40,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            ),
+            ComponentInstance(
+                comp_id="C_001",
+                comp_type=ComponentType.CAPACITOR,
+                name="C1",
+                x=40,
+                y=0,
+                pins=create_component_pins(ComponentType.CAPACITOR),
+            ),
+            ComponentInstance(
+                comp_id="GND_001",
+                comp_type=ComponentType.GROUND,
+                name="GND",
+                x=220,
+                y=0,
+                pins=create_component_pins(ComponentType.GROUND),
+            ),
+        ]
+        for comp in components:
+            model.add_component(comp)
+        for wire in [
+            Wire("W_IN", "R_001", "nt", "C_001", "nf"),
+            Wire("W_LEFT", "VS_001", "node_pos", "R_001", "nf"),
+            Wire("W_LEFT_TAP", "R_TAP", "nt", "R_001", "nf"),
+            Wire("W_RIGHT", "C_001", "nt", "GND_001", "gnd"),
+            Wire("W_REF", "VS_001", "node_neg", "GND_001", "gnd"),
+        ]:
+            model.add_wire(wire)
+        model._undo_stack.clear()
+        model._redo_stack.clear()
+        return model
+
+    def test_subcircuit_packaging_creates_internal_port_nodes(self):
+        port_type = getattr(ComponentType, "SUBCIRCUIT_PORT", None)
+        self.assertIsNotNone(port_type)
+
+        model = self._build_subcircuit_packaging_fixture()
+        result = model.create_subcircuit_from_selection(["R_001", "C_001"], "FILTER")
+
+        self.assertIsNotNone(result)
+        sub_comp, subdef = result
+        port_components = [
+            comp for comp in subdef.components.values()
+            if comp.comp_type == port_type
+        ]
+        self.assertEqual(len(port_components), 2)
+        self.assertEqual(len(subdef.ports), 2)
+        self.assertEqual(
+            {pin.name for pin in sub_comp.pins},
+            {port.port_name for port in subdef.ports},
+        )
+
+        for port in subdef.ports:
+            port_comp = subdef.components[port.internal_comp_id]
+            self.assertEqual(port_comp.comp_type, port_type)
+            self.assertEqual(port.internal_pin_name, "node")
+            self.assertTrue(
+                any(
+                    (
+                        wire.from_comp == port_comp.comp_id
+                        and wire.from_pin == "node"
+                        and wire.to_comp in {"R_001", "C_001"}
+                    )
+                    or (
+                        wire.to_comp == port_comp.comp_id
+                        and wire.to_pin == "node"
+                        and wire.from_comp in {"R_001", "C_001"}
+                    )
+                    for wire in subdef.wires.values()
+                )
+            )
+
+        left_port_name = next(
+            port.port_name
+            for port in subdef.ports
+            if any(
+                wire.from_comp == port.internal_comp_id and wire.to_comp == "R_001"
+                or wire.to_comp == port.internal_comp_id and wire.from_comp == "R_001"
+                for wire in subdef.wires.values()
+            )
+        )
+        external_left_wires = [
+            wire for wire in model.wires.values()
+            if (
+                wire.from_comp == sub_comp.comp_id
+                and wire.from_pin == left_port_name
+            )
+            or (
+                wire.to_comp == sub_comp.comp_id
+                and wire.to_pin == left_port_name
+            )
+        ]
+        self.assertEqual(len(external_left_wires), 2)
+
+    def test_subcircuit_flattening_maps_external_ports_to_internal_port_nodes(self):
+        port_type = getattr(ComponentType, "SUBCIRCUIT_PORT", None)
+        self.assertIsNotNone(port_type)
+
+        model = self._build_subcircuit_packaging_fixture()
+        sub_comp, subdef = model.create_subcircuit_from_selection(
+            ["R_001", "C_001"],
+            "FILTER",
+        )
+
+        flat = SolverBuilder()._flatten_subcircuits(model)
+        node_map = flat.assign_node_ids()
+        prefix = f"{sub_comp.comp_id}__"
+
+        self.assertNotIn(ComponentType.SUBCIRCUIT, {c.comp_type for c in flat.components.values()})
+        self.assertIn(port_type, {c.comp_type for c in flat.components.values()})
+        self.assertEqual(
+            node_map[("VS_001", "node_pos")],
+            node_map[(f"{prefix}R_001", "nf")],
+        )
+        self.assertEqual(
+            node_map[("R_TAP", "nt")],
+            node_map[(f"{prefix}R_001", "nf")],
+        )
+        self.assertEqual(
+            node_map[("GND_001", "gnd")],
+            node_map[(f"{prefix}C_001", "nt")],
+        )
+
+    def test_subcircuit_edit_mode_places_and_wires_inside_definition(self):
+        get_app()
+        port_type = getattr(ComponentType, "SUBCIRCUIT_PORT", None)
+        self.assertIsNotNone(port_type)
+
+        model = self._build_subcircuit_packaging_fixture()
+        model.create_subcircuit_from_selection(["R_001", "C_001"], "FILTER")
+        subdef = model.subcircuit_defs["FILTER"]
+        canvas = CircuitCanvas(model)
+        try:
+            canvas._enter_subcircuit("FILTER")
+            before_top_level_ids = set(model.components)
+
+            canvas._placing_type = ComponentType.RESISTOR
+            canvas._placing_params = {}
+            canvas._place_component(QPointF(140, 0))
+
+            new_ids = set(subdef.components) - {"R_001", "C_001", "PORT_001", "PORT_002"}
+            self.assertEqual(len(new_ids), 1)
+            new_id = next(iter(new_ids))
+            self.assertEqual(set(model.components), before_top_level_ids)
+
+            port_id = next(
+                comp.comp_id for comp in subdef.components.values()
+                if comp.comp_type == port_type
+            )
+            canvas._add_wire_between(new_id, "nf", port_id, "node")
+
+            self.assertTrue(
+                any(
+                    wire.from_comp == new_id and wire.to_comp == port_id
+                    or wire.from_comp == port_id and wire.to_comp == new_id
+                    for wire in subdef.wires.values()
+                )
+            )
+            self.assertFalse(
+                any(
+                    wire.from_comp == new_id or wire.to_comp == new_id
+                    for wire in model.wires.values()
+                )
+            )
+        finally:
+            canvas.close()
+
+    def test_subcircuit_edit_mode_refreshes_internal_wires(self):
+        get_app()
+        model = self._build_subcircuit_packaging_fixture()
+        model.create_subcircuit_from_selection(["R_001", "C_001"], "FILTER")
+        canvas = CircuitCanvas(model)
+        try:
+            canvas._enter_subcircuit("FILTER")
+            expected_wire_count = len(model.subcircuit_defs["FILTER"].wires)
+
+            canvas._refresh_wires()
+
+            self.assertEqual(len(canvas.wire_items), expected_wire_count)
+        finally:
+            canvas.close()
+
+    def test_subcircuit_edit_mode_wire_midpoint_junction_stays_inside_definition(self):
+        get_app()
+        model = self._build_subcircuit_packaging_fixture()
+        model.create_subcircuit_from_selection(["R_001", "C_001"], "FILTER")
+        subdef = model.subcircuit_defs["FILTER"]
+        subdef.components["R_001"].x = -100
+        subdef.components["C_001"].x = 100
+        tap = ComponentInstance(
+            comp_id="R_IN_TAP",
+            comp_type=ComponentType.RESISTOR,
+            name="Rtap",
+            x=0,
+            y=90,
+            pins=create_component_pins(ComponentType.RESISTOR),
+        )
+        subdef.components[tap.comp_id] = tap
+
+        canvas = CircuitCanvas(model)
+        try:
+            canvas._enter_subcircuit("FILTER")
+            canvas.set_mode(CanvasMode.WIRE)
+
+            start = canvas.component_items["R_IN_TAP"].get_all_scene_pin_positions()["nf"]
+            canvas._handle_wire_left_click(start)
+            canvas._handle_wire_right_click(QPointF(0, 0))
+
+            junction_type = getattr(ComponentType, "JUNCTION")
+            self.assertFalse(
+                any(comp.comp_type == junction_type for comp in model.components.values())
+            )
+            junctions = [
+                comp for comp in subdef.components.values()
+                if comp.comp_type == junction_type
+            ]
+            self.assertEqual(len(junctions), 1)
+            self.assertNotIn("W_IN", subdef.wires)
+            self.assertGreaterEqual(
+                len([
+                    wire for wire in subdef.wires.values()
+                    if wire.from_comp == junctions[0].comp_id or wire.to_comp == junctions[0].comp_id
+                ]),
+                3,
+            )
+        finally:
+            canvas.close()
+
+    def test_code_generator_flattens_subcircuits_through_port_nodes(self):
+        model = self._build_subcircuit_packaging_fixture()
+        sub_comp, _ = model.create_subcircuit_from_selection(["R_001", "C_001"], "FILTER")
+
+        code = generate_code(model)
+
+        self.assertIn(f'solver.add_R("{sub_comp.comp_id}__R1"', code)
+        self.assertIn(f'solver.add_C("{sub_comp.comp_id}__C1"', code)
+        self.assertNotIn("add_subcircuit", code)
+        self.assertNotIn("PORT_001", code)
+
     def test_code_preview_refreshes_after_wire_change(self):
         app = get_app()
         window = MainWindow()

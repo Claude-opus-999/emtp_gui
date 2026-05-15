@@ -115,6 +115,16 @@ def draw_junction(painter, component=None):
     painter.drawEllipse(-4, -4, 8, 8)
 
 
+def draw_subcircuit_port(painter, component=None):
+    painter.setPen(line_pen())
+    painter.setBrush(no_brush())
+    painter.drawRect(-10, -10, 20, 20)
+    painter.drawLine(-16, 0, -10, 0)
+    painter.drawLine(10, 0, 16, 0)
+    if component is not None:
+        draw_text(painter, component.name, QRectF(-24, 12, 48, 16), size=7, bold=True)
+
+
 def draw_subcircuit(painter, component):
     painter.setPen(line_pen())
     painter.setBrush(no_brush())

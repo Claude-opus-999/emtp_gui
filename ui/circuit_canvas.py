@@ -65,6 +65,8 @@ class ComponentGraphicsItem(QGraphicsItem):
             self._bounding_rect = QRectF(-45, -45, 90, 100)
         elif component.comp_type == ComponentType.JUNCTION:
             self._bounding_rect = QRectF(-8, -8, 16, 16)
+        elif component.comp_type == ComponentType.SUBCIRCUIT_PORT:
+            self._bounding_rect = QRectF(-24, -14, 48, 44)
         elif component.comp_type in (
             ComponentType.BERGERON,
             ComponentType.ULM,
@@ -139,14 +141,18 @@ class ComponentGraphicsItem(QGraphicsItem):
             painter.drawRect(-25, -15, 50, 30)
 
         # 绘制标签
-        if ct not in (ComponentType.UMEC_TRANSFORMER, ComponentType.JUNCTION):
+        if ct not in (
+            ComponentType.UMEC_TRANSFORMER,
+            ComponentType.JUNCTION,
+            ComponentType.SUBCIRCUIT_PORT,
+        ):
             painter.setPen(QColor("#1e2a3a"))
             font = QFont("Arial", 9)
             painter.setFont(font)
             painter.drawText(QPointF(-15, 35), self.component.name)
 
         # 绘制引脚
-        if ct != ComponentType.JUNCTION:
+        if ct not in (ComponentType.JUNCTION, ComponentType.SUBCIRCUIT_PORT):
             self._draw_pins(painter)
 
         if self.isSelected():
@@ -878,6 +884,67 @@ class CircuitCanvas(QGraphicsView):
         self.subcircuit_exited.emit()
         self._refresh_view()
 
+    def _active_subcircuit_def(self):
+        if not self._editing_subcircuit:
+            return None
+        return self.model.subcircuit_defs.get(self._editing_subcircuit)
+
+    def _active_components(self):
+        subdef = self._active_subcircuit_def()
+        if subdef is not None:
+            return subdef.components
+        return self.model.components
+
+    def _active_wires(self):
+        subdef = self._active_subcircuit_def()
+        if subdef is not None:
+            return subdef.wires
+        return self.model.wires
+
+    def _add_component_to_active_design(self, comp: ComponentInstance):
+        subdef = self._active_subcircuit_def()
+        if subdef is None:
+            self.model.add_component(comp)
+            return
+        self.model._save_undo_state()
+        subdef.components[comp.comp_id] = comp
+        self.model._sync_counter_for_component(comp)
+        self.model._notify("component_added")
+
+    def _add_wire_to_active_design(self, wire: Wire):
+        subdef = self._active_subcircuit_def()
+        if subdef is None:
+            self.model.add_wire(wire)
+            return
+        self.model._save_undo_state()
+        subdef.wires[wire.wire_id] = wire
+        self.model._notify("wire_added")
+
+    def _remove_component_from_active_design(self, comp_id: str):
+        subdef = self._active_subcircuit_def()
+        if subdef is None:
+            self.model.remove_component(comp_id)
+            return
+        self.model._save_undo_state()
+        if comp_id in subdef.components:
+            del subdef.components[comp_id]
+        for wire_id in [
+            wid for wid, wire in subdef.wires.items()
+            if wire.from_comp == comp_id or wire.to_comp == comp_id
+        ]:
+            del subdef.wires[wire_id]
+        self.model._notify("component_removed")
+
+    def _remove_wire_from_active_design(self, wire_id: str):
+        subdef = self._active_subcircuit_def()
+        if subdef is None:
+            self.model.remove_wire(wire_id)
+            return
+        self.model._save_undo_state()
+        if wire_id in subdef.wires:
+            del subdef.wires[wire_id]
+            self.model._notify("wire_removed")
+
     def mousePressEvent(self, event):
         """鼠标按下"""
         if event.button() == Qt.MouseButton.MiddleButton:
@@ -986,7 +1053,7 @@ class CircuitCanvas(QGraphicsView):
             ),
         )
 
-        self.model.add_component(comp)
+        self._add_component_to_active_design(comp)
 
         # 放置完成后自动回到选择模式
         self.set_mode(CanvasMode.SELECT)
@@ -1057,7 +1124,8 @@ class CircuitCanvas(QGraphicsView):
         if start_comp_id == end_comp_id:
             return None
 
-        for existing in self.model.wires.values():
+        active_wires = self._active_wires()
+        for existing in active_wires.values():
             same_direction = (
                 existing.from_comp == start_comp_id
                 and existing.from_pin == start_pin
@@ -1082,7 +1150,7 @@ class CircuitCanvas(QGraphicsView):
             to_pin=end_pin,
             waypoints=list(waypoints or []),
         )
-        self.model.add_wire(wire)
+        self._add_wire_to_active_design(wire)
         if self.mode != CanvasMode.SELECT:
             self._set_items_interactive(False)
         return wire
@@ -1093,6 +1161,8 @@ class CircuitCanvas(QGraphicsView):
         first_waypoints, second_waypoints = self._split_wire_waypoints(wire_item, split_pos)
 
         self.model._save_undo_state()
+        active_components = self._active_components()
+        active_wires = self._active_wires()
         junction = ComponentInstance(
             comp_id=self.model.generate_component_id(ComponentType.JUNCTION),
             comp_type=ComponentType.JUNCTION,
@@ -1133,11 +1203,11 @@ class CircuitCanvas(QGraphicsView):
             ),
         ]
 
-        self.model.components[junction.comp_id] = junction
+        active_components[junction.comp_id] = junction
         self.model._sync_counter_for_component(junction)
-        self.model.wires.pop(original.wire_id, None)
+        active_wires.pop(original.wire_id, None)
         for wire in new_wires:
-            self.model.wires[wire.wire_id] = wire
+            active_wires[wire.wire_id] = wire
         self._reset_wire_state()
         self.model._notify("component_added")
         if self.mode != CanvasMode.SELECT:
@@ -1236,7 +1306,7 @@ class CircuitCanvas(QGraphicsView):
             to_pin=end_pin,
             waypoints=waypoints,
         )
-        self.model.add_wire(wire)
+        self._add_wire_to_active_design(wire)
         if self.mode != CanvasMode.SELECT:
             self._set_items_interactive(False)
         self.wire_created.emit(start_comp_id, start_pin, end_comp_id, end_pin)
@@ -1254,9 +1324,9 @@ class CircuitCanvas(QGraphicsView):
         """处理删除模式下的点击"""
         item = self.get_item_at(pos)
         if isinstance(item, ComponentGraphicsItem):
-            self.model.remove_component(item.component.comp_id)
+            self._remove_component_from_active_design(item.component.comp_id)
         elif isinstance(item, WireGraphicsItem):
-            self.model.remove_wire(item.wire.wire_id)
+            self._remove_wire_from_active_design(item.wire.wire_id)
 
     def wheelEvent(self, event):
         """鼠标滚轮缩放"""
@@ -1503,12 +1573,12 @@ class CircuitCanvas(QGraphicsView):
                 items_to_delete.append(comp_id)
 
         for comp_id in items_to_delete:
-            self.model.remove_component(comp_id)
+            self._remove_component_from_active_design(comp_id)
 
         # 删除选中的连线
         for wire_id, item in list(self.wire_items.items()):
             if item.isSelected():
-                self.model.remove_wire(wire_id)
+                self._remove_wire_from_active_design(wire_id)
 
     def _rotate_selected(self):
         """旋转选中的元件"""
@@ -1642,7 +1712,7 @@ class CircuitCanvas(QGraphicsView):
         self.wire_items.clear()
 
         # 重新绘制连线
-        for wire in self.model.wires.values():
+        for wire in self._active_wires().values():
             start_item = self.component_items.get(wire.from_comp)
             end_item = self.component_items.get(wire.to_comp)
 
