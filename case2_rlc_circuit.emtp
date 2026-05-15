@@ -1,0 +1,124 @@
+{
+  "name": "RLC Series Resonance",
+  "components": {
+    "b1228b78": {
+      "id": "b1228b78",
+      "name": "Vac",
+      "type": "VS",
+      "node_from": 1,
+      "node_to": 0,
+      "extra_nodes": [],
+      "parameters": {
+        "voltage_type": "AC",
+        "V": 220.0,
+        "frequency": 50.0
+      },
+      "position": [
+        0.0,
+        0.0
+      ],
+      "rotation": 0,
+      "label": "Vac"
+    },
+    "cd1b2cf4": {
+      "id": "cd1b2cf4",
+      "name": "R",
+      "type": "R",
+      "node_from": 1,
+      "node_to": 2,
+      "extra_nodes": [],
+      "parameters": {
+        "R": 10.0
+      },
+      "position": [
+        0.0,
+        0.0
+      ],
+      "rotation": 0,
+      "label": "R"
+    },
+    "f285775c": {
+      "id": "f285775c",
+      "name": "L",
+      "type": "L",
+      "node_from": 2,
+      "node_to": 3,
+      "extra_nodes": [],
+      "parameters": {
+        "L": 0.01,
+        "Rp": 0
+      },
+      "position": [
+        0.0,
+        0.0
+      ],
+      "rotation": 0,
+      "label": "L"
+    },
+    "34593135": {
+      "id": "34593135",
+      "name": "C",
+      "type": "C",
+      "node_from": 3,
+      "node_to": 0,
+      "extra_nodes": [],
+      "parameters": {
+        "C": 0.0001,
+        "Rp": 0
+      },
+      "position": [
+        0.0,
+        0.0
+      ],
+      "rotation": 0,
+      "label": "C"
+    }
+  },
+  "connections": [],
+  "nodes": {
+    "1": {
+      "id": 1,
+      "label": "",
+      "position": [
+        0.0,
+        0.0
+      ],
+      "connected_components": [
+        "b1228b78",
+        "cd1b2cf4"
+      ]
+    },
+    "2": {
+      "id": 2,
+      "label": "",
+      "position": [
+        0.0,
+        0.0
+      ],
+      "connected_components": [
+        "cd1b2cf4",
+        "f285775c"
+      ]
+    },
+    "3": {
+      "id": 3,
+      "label": "",
+      "position": [
+        0.0,
+        0.0
+      ],
+      "connected_components": [
+        "f285775c",
+        "34593135"
+      ]
+    }
+  },
+  "simulation_config": {
+    "dt": 1e-07,
+    "finish_time": 0.0001,
+    "verbose": false,
+    "lightning_type": "2/20",
+    "lightning_peak": 10000.0,
+    "lightning_t_start": 0.0
+  }
+}

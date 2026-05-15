@@ -1,0 +1,32 @@
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE and local machine files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs and temporary outputs
+*.log
+tmp/
+temp/
+
+# Local workflow scratch files
+.superpowers/
+main_window_decompiled.py
+main_window_uncompyle.py

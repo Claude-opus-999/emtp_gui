@@ -1,0 +1,94 @@
+{
+  "name": "示例RC电路",
+  "components": {
+    "fcf42037": {
+      "id": "fcf42037",
+      "name": "Vdc",
+      "type": "VS",
+      "node_from": 1,
+      "node_to": 0,
+      "extra_nodes": [],
+      "parameters": {
+        "voltage_type": "DC",
+        "V": 100.0,
+        "frequency": 50.0
+      },
+      "position": [
+        0.0,
+        0.0
+      ],
+      "rotation": 0,
+      "label": "Vdc"
+    },
+    "1fdfdd2d": {
+      "id": "1fdfdd2d",
+      "name": "R1",
+      "type": "R",
+      "node_from": 1,
+      "node_to": 2,
+      "extra_nodes": [],
+      "parameters": {
+        "R": 100.0
+      },
+      "position": [
+        0.0,
+        0.0
+      ],
+      "rotation": 0,
+      "label": "R1"
+    },
+    "b8bf8b5b": {
+      "id": "b8bf8b5b",
+      "name": "C1",
+      "type": "C",
+      "node_from": 2,
+      "node_to": 0,
+      "extra_nodes": [],
+      "parameters": {
+        "C": 1e-06,
+        "Rp": 0
+      },
+      "position": [
+        0.0,
+        0.0
+      ],
+      "rotation": 0,
+      "label": "C1"
+    }
+  },
+  "connections": [],
+  "nodes": {
+    "1": {
+      "id": 1,
+      "label": "",
+      "position": [
+        0.0,
+        0.0
+      ],
+      "connected_components": [
+        "fcf42037",
+        "1fdfdd2d"
+      ]
+    },
+    "2": {
+      "id": 2,
+      "label": "",
+      "position": [
+        0.0,
+        0.0
+      ],
+      "connected_components": [
+        "1fdfdd2d",
+        "b8bf8b5b"
+      ]
+    }
+  },
+  "simulation_config": {
+    "dt": 1e-06,
+    "finish_time": 5e-05,
+    "verbose": false,
+    "lightning_type": "2/20",
+    "lightning_peak": 10000.0,
+    "lightning_t_start": 0.0
+  }
+}

@@ -1,0 +1,231 @@
+{
+  "schema_version": 3,
+  "version": "3.0",
+  "settings": {
+    "dt": 1e-08,
+    "finish_time": 0.0001,
+    "verbose": false,
+    "result_mode": "probes_only",
+    "ulm_batch_mode": "auto",
+    "record_node_history": false,
+    "record_branch_history": false,
+    "record_line_history": false,
+    "record_source_history": false,
+    "allow_dense_fallback": true,
+    "dense_fallback_max_size": 300,
+    "lightning_type": "8/20",
+    "lightning_peak": 10000.0,
+    "lightning_t_start": 1e-05
+  },
+  "components": {
+    "C_001": {
+      "comp_id": "C_001",
+      "comp_type": "C",
+      "name": "C1",
+      "x": -180,
+      "y": -160,
+      "rotation": 0,
+      "params": {
+        "C": 1e-06,
+        "Rp": null
+      },
+      "pins": [
+        {
+          "name": "nf",
+          "local_x": -30,
+          "local_y": 0,
+          "node_id": 1
+        },
+        {
+          "name": "nt",
+          "local_x": 30,
+          "local_y": 0,
+          "node_id": 2
+        }
+      ]
+    },
+    "GND_001": {
+      "comp_id": "GND_001",
+      "comp_type": "GND",
+      "name": "GND",
+      "x": -400,
+      "y": -100,
+      "rotation": 0,
+      "params": {},
+      "pins": [
+        {
+          "name": "gnd",
+          "local_x": 0,
+          "local_y": 0,
+          "node_id": 0
+        }
+      ]
+    },
+    "L_001": {
+      "comp_id": "L_001",
+      "comp_type": "L",
+      "name": "L1",
+      "x": -140,
+      "y": -80,
+      "rotation": 90,
+      "params": {
+        "L": 0.001,
+        "Rp": null
+      },
+      "pins": [
+        {
+          "name": "nf",
+          "local_x": -30,
+          "local_y": 0,
+          "node_id": 2
+        },
+        {
+          "name": "nt",
+          "local_x": 30,
+          "local_y": 0,
+          "node_id": 0
+        }
+      ]
+    },
+    "GND_002": {
+      "comp_id": "GND_002",
+      "comp_type": "GND",
+      "name": "GND",
+      "x": -140,
+      "y": 0,
+      "rotation": 0,
+      "params": {},
+      "pins": [
+        {
+          "name": "gnd",
+          "local_x": 0,
+          "local_y": 0,
+          "node_id": 0
+        }
+      ]
+    },
+    "R_001": {
+      "comp_id": "R_001",
+      "comp_type": "R",
+      "name": "R1",
+      "x": -20,
+      "y": -160,
+      "rotation": 0,
+      "params": {
+        "R": 100.0
+      },
+      "pins": [
+        {
+          "name": "nf",
+          "local_x": -30,
+          "local_y": 0,
+          "node_id": 2
+        },
+        {
+          "name": "nt",
+          "local_x": 30,
+          "local_y": 0,
+          "node_id": 0
+        }
+      ]
+    },
+    "GND_003": {
+      "comp_id": "GND_003",
+      "comp_type": "GND",
+      "name": "GND",
+      "x": 60,
+      "y": -20,
+      "rotation": 0,
+      "params": {},
+      "pins": [
+        {
+          "name": "gnd",
+          "local_x": 0,
+          "local_y": 0,
+          "node_id": 0
+        }
+      ]
+    },
+    "IS_002": {
+      "comp_id": "IS_002",
+      "comp_type": "IS",
+      "name": "IS2",
+      "x": -340,
+      "y": -160,
+      "rotation": 0,
+      "params": {
+        "current_func": {
+          "mode": "lightning",
+          "waveform_type": "1.2/50",
+          "peak": 10000.0,
+          "t_start": 1e-05
+        }
+      },
+      "pins": [
+        {
+          "name": "nf",
+          "local_x": -30,
+          "local_y": 0,
+          "node_id": 0
+        },
+        {
+          "name": "nt",
+          "local_x": 30,
+          "local_y": 0,
+          "node_id": 1
+        }
+      ]
+    }
+  },
+  "wires": {
+    "W_85f5347d": {
+      "wire_id": "W_85f5347d",
+      "from_comp": "C_001",
+      "from_pin": "nt",
+      "to_comp": "R_001",
+      "to_pin": "nf",
+      "waypoints": []
+    },
+    "W_41fd1db5": {
+      "wire_id": "W_41fd1db5",
+      "from_comp": "L_001",
+      "from_pin": "nf",
+      "to_comp": "C_001",
+      "to_pin": "nt",
+      "waypoints": []
+    },
+    "W_2afb390b": {
+      "wire_id": "W_2afb390b",
+      "from_comp": "R_001",
+      "from_pin": "nt",
+      "to_comp": "GND_003",
+      "to_pin": "gnd",
+      "waypoints": []
+    },
+    "W_96908322": {
+      "wire_id": "W_96908322",
+      "from_comp": "L_001",
+      "from_pin": "nt",
+      "to_comp": "GND_002",
+      "to_pin": "gnd",
+      "waypoints": []
+    },
+    "W_b0b7b943": {
+      "wire_id": "W_b0b7b943",
+      "from_comp": "GND_001",
+      "from_pin": "gnd",
+      "to_comp": "IS_002",
+      "to_pin": "nf",
+      "waypoints": []
+    },
+    "W_559c4629": {
+      "wire_id": "W_559c4629",
+      "from_comp": "IS_002",
+      "from_pin": "nt",
+      "to_comp": "C_001",
+      "to_pin": "nf",
+      "waypoints": []
+    }
+  },
+  "probes": []
+}

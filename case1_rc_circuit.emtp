@@ -1,0 +1,94 @@
+{
+  "name": "RC Voltage Divider",
+  "components": {
+    "27c3d0f8": {
+      "id": "27c3d0f8",
+      "name": "Vdc",
+      "type": "VS",
+      "node_from": 1,
+      "node_to": 0,
+      "extra_nodes": [],
+      "parameters": {
+        "voltage_type": "DC",
+        "V": 100.0,
+        "frequency": 50.0
+      },
+      "position": [
+        0.0,
+        0.0
+      ],
+      "rotation": 0,
+      "label": "Vdc"
+    },
+    "8ef6a790": {
+      "id": "8ef6a790",
+      "name": "R1",
+      "type": "R",
+      "node_from": 1,
+      "node_to": 2,
+      "extra_nodes": [],
+      "parameters": {
+        "R": 100.0
+      },
+      "position": [
+        0.0,
+        0.0
+      ],
+      "rotation": 0,
+      "label": "R1"
+    },
+    "4fd8c6be": {
+      "id": "4fd8c6be",
+      "name": "C1",
+      "type": "C",
+      "node_from": 2,
+      "node_to": 0,
+      "extra_nodes": [],
+      "parameters": {
+        "C": 1e-06,
+        "Rp": 0
+      },
+      "position": [
+        0.0,
+        0.0
+      ],
+      "rotation": 0,
+      "label": "C1"
+    }
+  },
+  "connections": [],
+  "nodes": {
+    "1": {
+      "id": 1,
+      "label": "",
+      "position": [
+        0.0,
+        0.0
+      ],
+      "connected_components": [
+        "27c3d0f8",
+        "8ef6a790"
+      ]
+    },
+    "2": {
+      "id": 2,
+      "label": "",
+      "position": [
+        0.0,
+        0.0
+      ],
+      "connected_components": [
+        "8ef6a790",
+        "4fd8c6be"
+      ]
+    }
+  },
+  "simulation_config": {
+    "dt": 1e-06,
+    "finish_time": 5e-05,
+    "verbose": false,
+    "lightning_type": "2/20",
+    "lightning_peak": 10000.0,
+    "lightning_t_start": 0.0
+  }
+}
