@@ -8,6 +8,7 @@ from ui.symbols.line_symbols import (
 from ui.symbols.primitive_symbols import (
     draw_capacitor,
     draw_current_source,
+    draw_ground_component,
     draw_inductor,
     draw_lpm,
     draw_moa,
@@ -32,6 +33,7 @@ def draw_component_symbol(painter, component) -> bool:
         ComponentType.SWITCH: draw_switch,
         ComponentType.MOA: draw_moa,
         ComponentType.LPM: draw_lpm,
+        ComponentType.GROUND: draw_ground_component,
         ComponentType.BERGERON: draw_bergeron,
         ComponentType.ULM: draw_ulm,
         ComponentType.LCP_OHL: draw_lcp_ohl,
