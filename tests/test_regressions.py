@@ -3,7 +3,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -271,6 +271,48 @@ class RegressionTests(unittest.TestCase):
         )
         self.assertTrue(r_item.isSelected())
         self.assertTrue(c_item.isSelected())
+
+        canvas.close()
+        app.processEvents()
+
+    def test_canvas_drag_preserves_multi_selection_and_moves_group(self):
+        app = get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        canvas.resize(600, 400)
+        canvas.show()
+
+        for comp_id, name, x in [("R_001", "R1", -60), ("C_001", "C1", 60)]:
+            model.add_component(
+                ComponentInstance(
+                    comp_id=comp_id,
+                    comp_type=ComponentType.RESISTOR,
+                    name=name,
+                    x=x,
+                    y=0,
+                    pins=create_component_pins(ComponentType.RESISTOR),
+                )
+            )
+        app.processEvents()
+        canvas.centerOn(0, 0)
+        app.processEvents()
+
+        r_item = canvas.component_items["R_001"]
+        c_item = canvas.component_items["C_001"]
+        r_item.setSelected(True)
+        c_item.setSelected(True)
+
+        start = canvas.mapFromScene(r_item.sceneBoundingRect().center())
+        end = start + QPoint(40, 0)
+        QTest.mousePress(canvas.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+        QTest.mouseMove(canvas.viewport(), end)
+        QTest.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
+        app.processEvents()
+
+        self.assertTrue(r_item.isSelected())
+        self.assertTrue(c_item.isSelected())
+        self.assertGreater(model.components["R_001"].x, -60)
+        self.assertGreater(model.components["C_001"].x, 60)
 
         canvas.close()
         app.processEvents()

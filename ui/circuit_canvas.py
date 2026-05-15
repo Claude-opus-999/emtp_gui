@@ -477,6 +477,8 @@ class ComponentGraphicsItem(QGraphicsItem):
         if is_left_click and self.flags() & QGraphicsItem.ItemIsSelectable:
             if ctrl_held:
                 self.setSelected(not was_selected)
+            elif was_selected and len(self.scene().selectedItems()) > 1:
+                self.setSelected(True)
             else:
                 for item in self.scene().selectedItems():
                     if item is not self:
