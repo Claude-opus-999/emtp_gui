@@ -53,6 +53,7 @@ class ComponentGraphicsItem(QGraphicsItem):
         self.brush = QBrush(QColor(color_str).lighter(180))
         self.pen = QPen(QColor(color_str), 2)
         self.selected_pen = QPen(QColor("#f59e0b"), 3)
+        self.selection_frame_pen = QPen(QColor("#2563eb"), 1.5, Qt.PenStyle.DashLine)
 
         # 元件尺寸
         if component.comp_type == ComponentType.SUBCIRCUIT:
@@ -133,6 +134,11 @@ class ComponentGraphicsItem(QGraphicsItem):
 
         # 绘制引脚
         self._draw_pins(painter)
+
+        if self.isSelected():
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(self.selection_frame_pen)
+            painter.drawRect(self.boundingRect().adjusted(3, 3, -3, -3))
 
     def _draw_pins(self, painter: QPainter):
         """绘制引脚端子（paint() 坐标系已被 Qt 自动旋转，直接用本地坐标）"""
@@ -461,12 +467,22 @@ class ComponentGraphicsItem(QGraphicsItem):
 
     def mousePressEvent(self, event):
         """鼠标按下 - 单击即可选中"""
-        self.setSelected(True)
-        self.model.select_component(self.component.comp_id)
+        was_selected = self.isSelected()
+        is_left_click = event.button() == Qt.MouseButton.LeftButton
+        ctrl_held = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         self._drag_started = False
-        if event.button() == Qt.LeftButton and self.flags() & QGraphicsItem.ItemIsMovable:
+        if is_left_click and self.flags() & QGraphicsItem.ItemIsMovable:
             self._drag_snapshot = self.model._snapshot()
         super().mousePressEvent(event)
+        if is_left_click and self.flags() & QGraphicsItem.ItemIsSelectable:
+            if ctrl_held:
+                self.setSelected(not was_selected)
+            else:
+                for item in self.scene().selectedItems():
+                    if item is not self:
+                        item.setSelected(False)
+                self.setSelected(True)
+            self.model.select_component(self.component.comp_id)
 
     def mouseReleaseEvent(self, event):
         """鼠标释放 - 拖拽结束时保存撤销状态"""
@@ -743,6 +759,17 @@ class CircuitCanvas(QGraphicsView):
                         best = (item, pin_name)
         return best
 
+    def _apply_component_selection(self, item: ComponentGraphicsItem, additive: bool = False):
+        """按 GUI 选择规则更新元件选择状态。"""
+        if additive:
+            item.setSelected(not item.isSelected())
+        else:
+            for selected in self.scene.selectedItems():
+                if selected is not item:
+                    selected.setSelected(False)
+            item.setSelected(True)
+        self.model.select_component(item.component.comp_id)
+
     def mouseDoubleClickEvent(self, event):
         """双击 — 进入子电路编辑模式"""
         if event.button() == Qt.LeftButton:
@@ -795,6 +822,12 @@ class CircuitCanvas(QGraphicsView):
                 self._handle_delete_click(pos)
                 super().mousePressEvent(event)
             else:
+                if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                    item = self.get_component_at(scene_pos)
+                    if item:
+                        self._apply_component_selection(item, additive=True)
+                        event.accept()
+                        return
                 super().mousePressEvent(event)
         else:
             super().mousePressEvent(event)

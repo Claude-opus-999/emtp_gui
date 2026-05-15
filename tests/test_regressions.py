@@ -3,6 +3,8 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from core.code_generator import generate_code
@@ -217,6 +219,61 @@ class RegressionTests(unittest.TestCase):
         canvas._paste_clipboard(canvas.mapToScene(0, 0))
 
         self.assertEqual(len(model.components), 2)
+
+    def test_canvas_click_selection_replaces_unless_ctrl_is_held(self):
+        app = get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        canvas.resize(600, 400)
+        canvas.show()
+
+        for comp_id, name, x in [("R_001", "R1", -60), ("C_001", "C1", 60)]:
+            model.add_component(
+                ComponentInstance(
+                    comp_id=comp_id,
+                    comp_type=ComponentType.RESISTOR,
+                    name=name,
+                    x=x,
+                    y=0,
+                    pins=create_component_pins(ComponentType.RESISTOR),
+                )
+            )
+        app.processEvents()
+        canvas.centerOn(0, 0)
+        app.processEvents()
+
+        r_item = canvas.component_items["R_001"]
+        c_item = canvas.component_items["C_001"]
+
+        QTest.mouseClick(
+            canvas.viewport(),
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            canvas.mapFromScene(r_item.sceneBoundingRect().center()),
+        )
+        self.assertTrue(r_item.isSelected())
+        self.assertFalse(c_item.isSelected())
+
+        QTest.mouseClick(
+            canvas.viewport(),
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            canvas.mapFromScene(c_item.sceneBoundingRect().center()),
+        )
+        self.assertFalse(r_item.isSelected())
+        self.assertTrue(c_item.isSelected())
+
+        QTest.mouseClick(
+            canvas.viewport(),
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.ControlModifier,
+            canvas.mapFromScene(r_item.sceneBoundingRect().center()),
+        )
+        self.assertTrue(r_item.isSelected())
+        self.assertTrue(c_item.isSelected())
+
+        canvas.close()
+        app.processEvents()
 
     def test_code_preview_refreshes_after_wire_change(self):
         app = get_app()
