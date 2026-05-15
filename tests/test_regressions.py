@@ -317,6 +317,43 @@ class RegressionTests(unittest.TestCase):
         canvas.close()
         app.processEvents()
 
+    def test_ground_pin_is_at_top_of_symbol(self):
+        pins = create_component_pins(ComponentType.GROUND)
+
+        self.assertEqual(len(pins), 1)
+        self.assertEqual(pins[0].name, "gnd")
+        self.assertLessEqual(pins[0].local_y, -20)
+
+    def test_canvas_scene_is_large_and_middle_drag_pans(self):
+        app = get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        canvas.resize(600, 400)
+        canvas.show()
+        app.processEvents()
+
+        scene_rect = canvas.sceneRect()
+        self.assertGreaterEqual(scene_rect.width(), 6000)
+        self.assertGreaterEqual(scene_rect.height(), 6000)
+
+        canvas.centerOn(0, 0)
+        app.processEvents()
+        start_h = canvas.horizontalScrollBar().value()
+        start_v = canvas.verticalScrollBar().value()
+        start = canvas.viewport().rect().center()
+        end = start + QPoint(80, 60)
+
+        QTest.mousePress(canvas.viewport(), Qt.MouseButton.MiddleButton, Qt.KeyboardModifier.NoModifier, start)
+        QTest.mouseMove(canvas.viewport(), end)
+        QTest.mouseRelease(canvas.viewport(), Qt.MouseButton.MiddleButton, Qt.KeyboardModifier.NoModifier, end)
+        app.processEvents()
+
+        self.assertNotEqual(canvas.horizontalScrollBar().value(), start_h)
+        self.assertNotEqual(canvas.verticalScrollBar().value(), start_v)
+
+        canvas.close()
+        app.processEvents()
+
     def test_code_preview_refreshes_after_wire_change(self):
         app = get_app()
         window = MainWindow()

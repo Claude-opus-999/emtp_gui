@@ -34,7 +34,7 @@ PINS = {
         {'name': 'nm_2', 'local_x': 30, 'local_y': 15},
     ],
     'ground': [  # 接地
-        {'name': 'gnd', 'local_x': 0, 'local_y': 0},
+        {'name': 'gnd', 'local_x': 0, 'local_y': -24},
     ],
     'moa': [  # MOA避雷器
         {'name': 'nf', 'local_x': -30, 'local_y': 0},

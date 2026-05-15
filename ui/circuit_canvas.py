@@ -659,6 +659,8 @@ class CircuitCanvas(QGraphicsView):
         self._placing_params: Dict[str, object] = {}
         self._wiring_start: Optional[Tuple[str, str]] = None  # (comp_id, pin_name)
         self._temp_line: Optional[WireGraphicsItem] = None
+        self._middle_panning = False
+        self._middle_pan_last_pos: Optional[QPoint] = None
 
         # 子电路编辑模式
         self._editing_subcircuit: Optional[str] = None  # 当前正在编辑的子电路名
@@ -679,7 +681,7 @@ class CircuitCanvas(QGraphicsView):
 
     def _init_background(self):
         self.setBackgroundBrush(QColor("#f8fafc"))
-        self.setSceneRect(-500, -500, 2000, 2000)
+        self.setSceneRect(-3000, -3000, 6000, 6000)
 
     def drawBackground(self, painter: QPainter, rect: QRectF):
         """绘制网格背景（在场景背景层，不会遮挡任何图形项）"""
@@ -814,6 +816,13 @@ class CircuitCanvas(QGraphicsView):
 
     def mousePressEvent(self, event):
         """鼠标按下"""
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._middle_panning = True
+            self._middle_pan_last_pos = event.pos()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+
         if event.button() == Qt.LeftButton:
             scene_pos = self.mapToScene(event.pos())
 
@@ -846,6 +855,14 @@ class CircuitCanvas(QGraphicsView):
 
     def mouseMoveEvent(self, event):
         """鼠标移动 - 拖拽式连线时更新临时线"""
+        if self._middle_panning and self._middle_pan_last_pos is not None:
+            delta = event.pos() - self._middle_pan_last_pos
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - delta.y())
+            self._middle_pan_last_pos = event.pos()
+            event.accept()
+            return
+
         if self.mode == CanvasMode.WIRE and self._wiring_start:
             scene_pos = self.mapToScene(event.pos())
             self._temp_line.update_positions(end_pos=scene_pos)
@@ -853,6 +870,18 @@ class CircuitCanvas(QGraphicsView):
 
     def mouseReleaseEvent(self, event):
         """鼠标释放 - 拖拽式连线时完成或取消"""
+        if event.button() == Qt.MouseButton.MiddleButton and self._middle_panning:
+            self._middle_panning = False
+            self._middle_pan_last_pos = None
+            if self.mode == CanvasMode.SELECT:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+            elif self.mode in (CanvasMode.PLACE, CanvasMode.WIRE):
+                self.setCursor(Qt.CursorShape.CrossCursor)
+            elif self.mode == CanvasMode.DELETE:
+                self.setCursor(Qt.CursorShape.ForbiddenCursor)
+            event.accept()
+            return
+
         if event.button() == Qt.LeftButton and self.mode == CanvasMode.WIRE and self._wiring_start:
             scene_pos = self.mapToScene(event.pos())
             pin_info = self.get_pin_at(scene_pos)
