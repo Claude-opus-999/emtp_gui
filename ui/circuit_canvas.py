@@ -926,6 +926,9 @@ class CircuitCanvas(QGraphicsView):
 
     def set_mode(self, mode: CanvasMode):
         """设置交互模式"""
+        previous_mode = self.mode
+        if previous_mode == CanvasMode.WIRE and mode != CanvasMode.WIRE:
+            self._clear_wire_input_state()
         self.mode = mode
         if mode == CanvasMode.SELECT:
             self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
@@ -1369,10 +1372,17 @@ class CircuitCanvas(QGraphicsView):
                 self._start_wire_drag(pin_info, scene_pos)
             return
 
-        waypoint = self._constrain_wire_point(scene_pos)
-        last = self._wire_last_point()
-        if last is None or not WireGraphicsItem._same_point(last, waypoint):
-            self._wire_waypoints.append(waypoint)
+        if pin_info:
+            self._complete_wire_drag(pin_info)
+            return
+
+        wire_item = self.get_wire_at(scene_pos)
+        if wire_item:
+            self._complete_wire_to_existing_wire(wire_item, scene_pos)
+            return
+
+        waypoint = self._resolve_wire_point(scene_pos, snap_to_wires=False)
+        self._append_wire_vertices_to(waypoint)
         self._update_temp_wire(waypoint)
 
     def _handle_wire_right_click(self, scene_pos: QPointF):
@@ -1437,8 +1447,11 @@ class CircuitCanvas(QGraphicsView):
         if not isValid(self._temp_line):
             self._clear_wire_input_state()
             return
-        preview_pos = self._constrain_wire_point(end_pos)
-        self._temp_line.wire.waypoints = self._wire_waypoint_tuples()
+        preview_points = self._wire_path_to(self._resolve_wire_point(end_pos))
+        if len(preview_points) < 2:
+            return
+        preview_pos = preview_points[-1]
+        self._temp_line.wire.waypoints = self._wire_point_tuples(preview_points[1:-1])
         self._temp_line.update_positions(end_pos=preview_pos)
         self._update_temp_wire_node(preview_pos)
 
@@ -1473,6 +1486,80 @@ class CircuitCanvas(QGraphicsView):
             return self._wire_waypoints[-1]
         return self._wire_start_scene_pos()
 
+    def _resolve_wire_point(self, pos: QPointF, snap_to_wires: bool = True) -> QPointF:
+        pin_info = self.get_pin_at(pos)
+        if pin_info:
+            comp_item, pin_name = pin_info
+            return QPointF(comp_item.get_all_scene_pin_positions()[pin_name])
+
+        if snap_to_wires:
+            wire_item = self.get_wire_at(pos)
+            if wire_item is not None:
+                return self.snap_to_grid(wire_item.nearest_point(pos))
+
+        return self.snap_to_grid(pos)
+
+    @staticmethod
+    def _same_wire_point(first: QPointF, second: QPointF) -> bool:
+        return WireGraphicsItem._same_point(first, second)
+
+    def _orthogonal_additions(self, start: QPointF, target: QPointF) -> List[QPointF]:
+        if self._same_wire_point(start, target):
+            return []
+        if abs(start.x() - target.x()) <= 0.1 or abs(start.y() - target.y()) <= 0.1:
+            return [QPointF(target)]
+        return [
+            QPointF(target.x(), start.y()),
+            QPointF(target),
+        ]
+
+    def _normalize_wire_points(self, points: List[QPointF]) -> List[QPointF]:
+        deduped: List[QPointF] = []
+        for point in points:
+            if not deduped or not self._same_wire_point(deduped[-1], point):
+                deduped.append(QPointF(point))
+
+        if len(deduped) <= 2:
+            return deduped
+
+        normalized = [deduped[0]]
+        for index in range(1, len(deduped) - 1):
+            prev = normalized[-1]
+            curr = deduped[index]
+            next_point = deduped[index + 1]
+            horizontal = (
+                abs(prev.y() - curr.y()) <= 0.1
+                and abs(curr.y() - next_point.y()) <= 0.1
+            )
+            vertical = (
+                abs(prev.x() - curr.x()) <= 0.1
+                and abs(curr.x() - next_point.x()) <= 0.1
+            )
+            if horizontal or vertical:
+                continue
+            normalized.append(QPointF(curr))
+        normalized.append(deduped[-1])
+        return normalized
+
+    def _current_wire_points(self) -> List[QPointF]:
+        start = self._wire_start_scene_pos()
+        if start is None:
+            return []
+        return [QPointF(start), *[QPointF(point) for point in self._wire_waypoints]]
+
+    def _wire_path_to(self, target: QPointF) -> List[QPointF]:
+        points = self._current_wire_points()
+        if not points:
+            return []
+        points.extend(self._orthogonal_additions(points[-1], target))
+        return self._normalize_wire_points(points)
+
+    def _append_wire_vertices_to(self, target: QPointF):
+        points = self._wire_path_to(target)
+        if len(points) <= 1:
+            return
+        self._wire_waypoints = [QPointF(point) for point in points[1:]]
+
     @staticmethod
     def _points_axis_aligned(first: QPointF, second: QPointF) -> bool:
         return (
@@ -1481,22 +1568,19 @@ class CircuitCanvas(QGraphicsView):
         )
 
     def _constrain_wire_point(self, pos: QPointF) -> QPointF:
-        snapped = self.snap_to_grid(pos)
-        last = self._wire_last_point()
-        if last is None:
-            return snapped
-        dx = snapped.x() - last.x()
-        dy = snapped.y() - last.y()
-        if abs(dx) >= abs(dy):
-            return QPointF(snapped.x(), last.y())
-        return QPointF(last.x(), snapped.y())
+        return self._resolve_wire_point(pos)
 
     def _target_reachable_from_last_point(self, target: QPointF) -> bool:
         last = self._wire_last_point()
         return last is not None and self._points_axis_aligned(last, target)
 
     def _wire_waypoint_tuples(self, end_pos: Optional[QPointF] = None) -> List[tuple]:
-        return [self._point_tuple(point) for point in self._wire_waypoints]
+        if end_pos is None:
+            return [self._point_tuple(point) for point in self._wire_waypoints]
+        points = self._wire_path_to(end_pos)
+        if len(points) < 2:
+            return []
+        return self._wire_point_tuples(points[1:-1])
 
     def _add_wire_between(
         self,
@@ -1559,11 +1643,12 @@ class CircuitCanvas(QGraphicsView):
             return
 
         start_comp_id, start_pin = self._wiring_start
-        end_pos = self._constrain_wire_point(scene_pos)
-        last = self._wire_last_point()
-        if last is not None and WireGraphicsItem._same_point(last, end_pos):
+        end_pos = self._resolve_wire_point(scene_pos, snap_to_wires=False)
+        path = self._wire_path_to(end_pos)
+        if len(path) < 2 or WireGraphicsItem._same_point(path[0], path[-1]):
             self._cancel_wire_drag()
             return
+        end_pos = path[-1]
 
         self.model._save_undo_state()
         active_components = self._active_components()
@@ -1577,7 +1662,7 @@ class CircuitCanvas(QGraphicsView):
             from_pin=start_pin,
             to_comp=junction.comp_id,
             to_pin="node",
-            waypoints=self._wire_waypoint_tuples(),
+            waypoints=self._wire_point_tuples(path[1:-1]),
         )
 
         active_components[junction.comp_id] = junction
@@ -1591,8 +1676,8 @@ class CircuitCanvas(QGraphicsView):
     def _complete_wire_to_existing_wire(self, wire_item: WireGraphicsItem, scene_pos: QPointF):
         start_comp_id, start_pin = self._wiring_start
         split_pos = self.snap_to_grid(wire_item.nearest_point(scene_pos))
-        if not self._target_reachable_from_last_point(split_pos):
-            self._update_temp_wire(split_pos)
+        path = self._wire_path_to(split_pos)
+        if len(path) < 2 or WireGraphicsItem._same_point(path[0], path[-1]):
             return
         first_waypoints, second_waypoints = self._split_wire_waypoints(wire_item, split_pos)
 
@@ -1626,7 +1711,7 @@ class CircuitCanvas(QGraphicsView):
                 from_pin=start_pin,
                 to_comp=junction.comp_id,
                 to_pin="node",
-                waypoints=self._wire_waypoint_tuples(),
+                waypoints=self._wire_point_tuples(path[1:-1]),
             ),
         ]
 
@@ -1700,10 +1785,10 @@ class CircuitCanvas(QGraphicsView):
         start_comp_id, start_pin = self._wiring_start
         end_comp_id, end_pin = comp_item.component.comp_id, pin_name
         end_pos = comp_item.get_all_scene_pin_positions()[pin_name]
-        if not self._target_reachable_from_last_point(end_pos):
-            self._update_temp_wire(end_pos)
+        path = self._wire_path_to(end_pos)
+        if len(path) < 2 or WireGraphicsItem._same_point(path[0], path[-1]):
             return
-        waypoints = self._wire_waypoint_tuples()
+        waypoints = self._wire_point_tuples(path[1:-1])
 
         # 清除临时线
         self._clear_wire_input_state()

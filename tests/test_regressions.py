@@ -581,7 +581,10 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(wires[0].from_pin, "nt")
             self.assertEqual(wires[0].to_comp, "R_002")
             self.assertEqual(wires[0].to_pin, "nf")
-            self.assertEqual(wires[0].waypoints, [(-70.0, -40.0), (70.0, -40.0)])
+            self.assertEqual(
+                wires[0].waypoints,
+                [(-50.0, 0.0), (-50.0, -40.0), (70.0, -40.0)],
+            )
             points = [start, *[QPointF(x, y) for x, y in wires[0].waypoints], end]
             for first, second in zip(points, points[1:]):
                 self.assertTrue(
@@ -638,8 +641,9 @@ class RegressionTests(unittest.TestCase):
             canvas._update_temp_wire(QPointF(17, -24))
 
             self.assertIsNotNone(canvas._temp_wire_node)
-            self.assertEqual(canvas._temp_wire_node.pos(), QPointF(15, 0))
-            self.assertEqual(canvas._temp_line.end_pos, QPointF(15, 0))
+            self.assertEqual(canvas._temp_wire_node.pos(), QPointF(15, -25))
+            self.assertEqual(canvas._temp_line.wire.waypoints, [(15.0, 0.0)])
+            self.assertEqual(canvas._temp_line.end_pos, QPointF(15, -25))
 
             end = canvas.component_items["R_002"].get_all_scene_pin_positions()["nf"]
             canvas._handle_wire_right_click(end)
@@ -749,8 +753,12 @@ class RegressionTests(unittest.TestCase):
             canvas._handle_wire_left_click(QPointF(20, -10))
             canvas._update_temp_wire(QPointF(25, -75))
 
-            self.assertEqual(canvas._wire_waypoints, [QPointF(20, 0)])
-            self.assertEqual(canvas._temp_line.end_pos, QPointF(20, -75))
+            self.assertEqual(canvas._wire_waypoints, [QPointF(20, 0), QPointF(20, -10)])
+            self.assertEqual(
+                canvas._temp_line.wire.waypoints,
+                [(20.0, 0.0), (20.0, -10.0), (25.0, -10.0)],
+            )
+            self.assertEqual(canvas._temp_line.end_pos, QPointF(25, -75))
         finally:
             canvas.close()
 
@@ -813,11 +821,81 @@ class RegressionTests(unittest.TestCase):
                 if comp.comp_type == ComponentType.JUNCTION
             ]
             self.assertEqual(len(junctions), 1)
-            self.assertEqual((junctions[0].x, junctions[0].y), (15, 0))
+            self.assertEqual((junctions[0].x, junctions[0].y), (15, -25))
             self.assertEqual(len(model.wires), 1)
+            self.assertEqual(list(model.wires.values())[0].waypoints, [(15.0, 0.0)])
             self.assertIsNone(canvas._wiring_start)
             self.assertIsNone(canvas._temp_wire_node)
             self.assertEqual(canvas.mode, CanvasMode.WIRE)
+        finally:
+            canvas.close()
+
+    def test_wire_left_click_on_terminal_auto_commits_with_bend(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            r1 = ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=-100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            r2 = ComponentInstance(
+                comp_id="R_002",
+                comp_type=ComponentType.RESISTOR,
+                name="R2",
+                x=100,
+                y=60,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            model.add_component(r1)
+            model.add_component(r2)
+            canvas.set_mode(CanvasMode.WIRE)
+
+            start = canvas.component_items["R_001"].get_all_scene_pin_positions()["nt"]
+            end = canvas.component_items["R_002"].get_all_scene_pin_positions()["nf"]
+            canvas._handle_wire_left_click(start)
+            canvas._handle_wire_left_click(end)
+
+            wires = list(model.wires.values())
+            self.assertEqual(len(wires), 1)
+            self.assertEqual(wires[0].to_comp, "R_002")
+            self.assertEqual(wires[0].to_pin, "nf")
+            self.assertEqual(wires[0].waypoints, [(70.0, 0.0)])
+            self.assertIsNone(canvas._wiring_start)
+            self.assertIsNone(canvas._temp_line)
+            self.assertEqual(canvas.mode, CanvasMode.WIRE)
+        finally:
+            canvas.close()
+
+    def test_exiting_wire_mode_discards_temporary_wire(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            r1 = ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=-100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            model.add_component(r1)
+            canvas.set_mode(CanvasMode.WIRE)
+            start = canvas.component_items["R_001"].get_all_scene_pin_positions()["nt"]
+
+            canvas._handle_wire_left_click(start)
+            canvas._update_temp_wire(QPointF(15, -25))
+            canvas.set_mode(CanvasMode.SELECT)
+
+            self.assertIsNone(canvas._wiring_start)
+            self.assertIsNone(canvas._temp_line)
+            self.assertIsNone(canvas._temp_wire_node)
+            self.assertEqual(len(model.wires), 0)
         finally:
             canvas.close()
 
