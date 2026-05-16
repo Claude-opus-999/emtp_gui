@@ -669,9 +669,47 @@ class SolverBuilder:
 
         elif mode == 'custom':
             expr = func_def.get('expression', 'lambda t: 0.0')
-            return eval(expr, {"np": np, "numpy": np, "__builtins__": {}})
+            return self._safe_eval_source_expr(expr)
 
         return 0.0
+
+    @staticmethod
+    def _safe_eval_source_expr(expr: str):
+        """Safely evaluate a custom source expression in lambda form."""
+        import re
+
+        expr = expr.strip()
+        blacklist = re.compile(
+            r'(__\w+__|import|exec|eval|open|compile|globals|locals'
+            r'|getattr|setattr|delattr|vars|dir|type|super'
+            r'|breakpoint|exit|quit|os\.|sys\.|subprocess)',
+            re.IGNORECASE,
+        )
+        if blacklist.search(expr):
+            raise ValueError(
+                f"Source expression contains disallowed content: {expr!r}. "
+                "Use only 'lambda t: <math expression>'."
+            )
+        if not re.match(r'^lambda\s+\w+\s*:', expr):
+            raise ValueError(
+                f"Invalid source expression format: {expr!r}. "
+                "Use 'lambda t: <math expression>'."
+            )
+
+        safe_ns = {
+            "np": np,
+            "numpy": np,
+            "sin": np.sin,
+            "cos": np.cos,
+            "exp": np.exp,
+            "sqrt": np.sqrt,
+            "log": np.log,
+            "log10": np.log10,
+            "pi": np.pi,
+            "abs": abs,
+            "__builtins__": {},
+        }
+        return eval(expr, safe_ns)
 
     # ================================================================
     #  MOA 断点生成（旧格式兼容）

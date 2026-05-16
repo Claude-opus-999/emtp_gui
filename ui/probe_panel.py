@@ -32,7 +32,7 @@ class ProbePanel(QWidget):
 
         # 自动探针开关
         self.auto_probe_check = QCheckBox("自动为所有非地节点添加电压探针")
-        self.auto_probe_check.setChecked(self.model.settings.result_mode == "probes_only")
+        self.auto_probe_check.setChecked(self.model.settings.auto_voltage_probes)
         self.auto_probe_check.setStyleSheet("color: #334155; font-weight: bold;")
         self.auto_probe_check.toggled.connect(self._on_auto_probe_toggled)
         layout.addWidget(self.auto_probe_check)
@@ -246,10 +246,10 @@ class ProbePanel(QWidget):
             self.probes_changed.emit()
 
     def _on_auto_probe_toggled(self, checked: bool):
-        self.model.update_settings(result_mode="probes_only" if checked else "full")
+        self.model.update_settings(auto_voltage_probes=checked)
 
     def _sync_auto_probe_check(self):
-        checked = self.model.settings.result_mode == "probes_only"
+        checked = self.model.settings.auto_voltage_probes
         self.auto_probe_check.blockSignals(True)
         self.auto_probe_check.setChecked(checked)
         self.auto_probe_check.blockSignals(False)

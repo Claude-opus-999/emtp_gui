@@ -6,6 +6,7 @@ EMTP 电路仿真 GUI - 后台仿真执行器
 """
 
 from PySide6.QtCore import QThread, Signal
+import copy
 import inspect
 import traceback
 
@@ -111,7 +112,7 @@ class SimulationRunner(QThread):
             model: CircuitModel 实例
         """
         super().__init__(parent)
-        self.model = model
+        self.model = copy.deepcopy(model)
         self._cancel_requested = False
 
     def request_cancel(self):

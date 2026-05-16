@@ -239,6 +239,7 @@ class SimSettings:
     record_branch_history: bool = False
     record_line_history: bool = False
     record_source_history: bool = False
+    auto_voltage_probes: bool = False
     allow_dense_fallback: bool = True
     dense_fallback_max_size: int = 300
     # 雷电参数保留
@@ -257,6 +258,7 @@ class SimSettings:
             'record_branch_history': self.record_branch_history,
             'record_line_history': self.record_line_history,
             'record_source_history': self.record_source_history,
+            'auto_voltage_probes': self.auto_voltage_probes,
             'allow_dense_fallback': self.allow_dense_fallback,
             'dense_fallback_max_size': self.dense_fallback_max_size,
             'lightning_type': self.lightning_type,
@@ -276,6 +278,7 @@ class SimSettings:
             record_branch_history=data.get('record_branch_history', False),
             record_line_history=data.get('record_line_history', False),
             record_source_history=data.get('record_source_history', False),
+            auto_voltage_probes=data.get('auto_voltage_probes', False),
             allow_dense_fallback=data.get('allow_dense_fallback', True),
             dense_fallback_max_size=data.get('dense_fallback_max_size', 300),
             lightning_type=data.get('lightning_type', '8/20'),
@@ -353,6 +356,7 @@ class CircuitModel:
 
         # 元件ID计数器
         self._id_counters: Dict[str, int] = {}
+        self._selected_ids: List[str] = []
 
     # ---- 观察者模式 ----
 
@@ -374,13 +378,26 @@ class CircuitModel:
 
     def select_component(self, comp_id: str):
         """选中元件"""
+        self._selected_ids = [comp_id] if comp_id in self.components else []
         self._notify("component_selected")
-        pass  # 实际选择由画布处理
+
+    def select_components(self, comp_ids: List[str]):
+        """选中多个元件"""
+        self._selected_ids = [cid for cid in comp_ids if cid in self.components]
+        self._notify("component_selected")
+
+    def clear_selection(self):
+        """清除选择"""
+        self._selected_ids.clear()
+        self._notify("component_selected")
 
     def get_selected_components(self) -> List[ComponentInstance]:
         """获取选中的元件列表"""
-        # 注：由画布管理选择状态
-        return []
+        return [
+            self.components[cid]
+            for cid in self._selected_ids
+            if cid in self.components
+        ]
 
     # ---- 元件ID生成 ----
 
@@ -553,7 +570,7 @@ class CircuitModel:
         """获取画布上 PROBE 元件对应的探针。
 
         支持 voltage_ground / voltage_between / branch_current 三种画布探针类型。
-        当 result_mode="probes_only" 时，还会自动为所有非接地节点
+        当 auto_voltage_probes=True 时，还会自动为所有非接地节点
         添加电压探针（除非用户已在该节点放置了探针）。
         """
         node_map = self.assign_node_ids()
@@ -644,11 +661,14 @@ class CircuitModel:
                                 unit=unit,
                             ))
 
-        # probes_only 模式下，自动为尚未覆盖的非接地节点添加电压探针
-        if self.settings.result_mode == "probes_only":
+        # 用户启用自动电压探针时，补充尚未覆盖的非接地节点。
+        if self.settings.auto_voltage_probes:
             # 收集已有电压探针覆盖的节点
             covered_nodes = set()
             for p in probes:
+                if p.probe_type == "voltage" and p.node_pos is not None:
+                    covered_nodes.add(p.node_pos)
+            for p in self.probes:
                 if p.probe_type == "voltage" and p.node_pos is not None:
                     covered_nodes.add(p.node_pos)
             # 遍历所有节点，补充缺失的电压探针
@@ -805,7 +825,7 @@ class CircuitModel:
         self._save_undo_state()
 
         # 移除外部连接线
-        for wid, _, _, _, _ in port_pins:
+        for wid, _port_name, _ext_comp, _ext_pin, _was_from in port_pins:
             if wid in self.wires:
                 del self.wires[wid]
 
@@ -846,7 +866,6 @@ class CircuitModel:
         self.components[sub_comp.comp_id] = sub_comp
 
         # 8. 重新连接外部线（从外部元件连到子电路端口引脚）
-        import uuid as _uuid
         for wid, port_name, ext_comp, ext_pin, internal_was_from in port_pins:
             if internal_was_from:
                 from_comp, from_pin = sub_comp.comp_id, port_name
@@ -855,7 +874,7 @@ class CircuitModel:
                 from_comp, from_pin = ext_comp, ext_pin
                 to_comp, to_pin = sub_comp.comp_id, port_name
             new_wire = Wire(
-                wire_id=f"W_{_uuid.uuid4().hex[:8]}",
+                wire_id=f"W_{uuid.uuid4().hex[:8]}",
                 from_comp=from_comp,
                 from_pin=from_pin,
                 to_comp=to_comp,

@@ -3,17 +3,22 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtGui import QColor, QImage, QKeyEvent, QPainter, QPainterPath, QValidator
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QGraphicsItem, QPushButton, QToolBar
 
+import ui.main_window as main_window_module
 from core.code_generator import generate_code
 from core.file_io import load_project
 from core.solver_builder import SolverBuilder
-from models.circuit_model import CircuitModel, ComponentInstance, ComponentType, Pin, Wire
+from core.sim_runner import SimulationRunner
+from core.validator import CircuitValidator, ValidationSeverity
+from models.circuit_model import CircuitModel, ComponentInstance, ComponentType, Pin, ProbeConfig, SimSettings, Wire
 from models.component_lib import create_component_pins, get_default_params
-from ui.circuit_canvas import CircuitCanvas, CanvasMode
+from ui.circuit_canvas import CircuitCanvas, CanvasMode, WireGraphicsItem
 from ui.main_window import MainWindow
+from ui.probe_panel import ProbePanel
 
 
 def get_app():
@@ -120,6 +125,121 @@ class RegressionTests(unittest.TestCase):
             window.close()
             app.processEvents()
 
+    def test_property_float_editor_accepts_scientific_notation_text(self):
+        app = get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        panel = main_window_module.PropertyPanel(model, canvas)
+        try:
+            resistor = ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=0,
+                y=0,
+                params={"R": 100.0},
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            model.add_component(resistor)
+            panel._show_component(resistor)
+            spin = dict(panel._param_spin_widgets)["R"]
+
+            text = "4.256e-3"
+            state, _, _ = spin.validate(text, len(text))
+            exp_state, _, _ = spin.validate("4.256e", len("4.256e"))
+            sign_state, _, _ = spin.validate("4.256e-", len("4.256e-"))
+
+            self.assertEqual(state, QValidator.State.Acceptable)
+            self.assertEqual(exp_state, QValidator.State.Intermediate)
+            self.assertEqual(sign_state, QValidator.State.Intermediate)
+            spin.lineEdit().selectAll()
+            QTest.keyClicks(spin.lineEdit(), text)
+            spin.interpretText()
+            app.processEvents()
+
+            self.assertAlmostEqual(model.components["R_001"].params["R"], 4.256e-3)
+        finally:
+            panel.close()
+            canvas.close()
+            app.processEvents()
+
+    def test_main_toolbar_stops_at_wire_mode_button(self):
+        app = get_app()
+        window = MainWindow()
+        try:
+            main_toolbar = next(
+                toolbar for toolbar in window.findChildren(QToolBar)
+                if toolbar.windowTitle() == "主工具栏"
+            )
+            tooltips = [
+                button.toolTip()
+                for button in main_toolbar.findChildren(QPushButton)
+            ]
+
+            self.assertEqual(tooltips[-1], "连线模式 (Ctrl+W)")
+            for removed in ("添加接地 (Ctrl+G)", "旋转元件 (Ctrl+R)", "删除 (Del)", "清空电路"):
+                self.assertNotIn(removed, tooltips)
+        finally:
+            window.close()
+            app.processEvents()
+
+    def test_main_window_connects_simulation_log_and_results(self):
+        app = get_app()
+
+        class FakeSignal:
+            def __init__(self):
+                self.connected = []
+
+            def connect(self, callback):
+                self.connected.append(callback)
+
+        class FakeRunner:
+            instances = []
+
+            def __init__(self, model, parent=None):
+                self.model = model
+                self.parent = parent
+                self.progress = FakeSignal()
+                self.progress_pct = FakeSignal()
+                self.log_received = FakeSignal()
+                self.results_ready = FakeSignal()
+                self.finished_ok = FakeSignal()
+                self.error = FakeSignal()
+                self.started = False
+                FakeRunner.instances.append(self)
+
+            def start(self):
+                self.started = True
+
+            def isRunning(self):
+                return False
+
+            def request_cancel(self):
+                pass
+
+        original_runner = main_window_module.SimulationRunner
+        main_window_module.SimulationRunner = FakeRunner
+        window = MainWindow()
+        try:
+            self.assertIsNone(window._last_sim_results)
+
+            window._on_run_simulation()
+
+            runner = FakeRunner.instances[-1]
+            self.assertIn(window._on_sim_log, runner.log_received.connected)
+            self.assertIn(window._on_sim_results, runner.results_ready.connected)
+            self.assertTrue(runner.started)
+
+            results = {"probes": {"P1": {}}, "timing": {"steps": 10}}
+            window._on_sim_results(results)
+            self.assertIs(window._last_sim_results, results)
+        finally:
+            main_window_module.SimulationRunner = original_runner
+            if getattr(window, "_progress_dialog", None):
+                window._progress_dialog.close()
+            window.close()
+            app.processEvents()
+
     def test_load_legacy_project_keeps_component_types(self):
         model = load_project("example_circuit.emtp")
 
@@ -134,6 +254,32 @@ class RegressionTests(unittest.TestCase):
         self.assertIn('solver.add_VS("Vdc", 1, 0, 100)', code)
         self.assertIn('solver.add_R("R1", 1, 2, 100)', code)
         self.assertIn('solver.add_C("C1", 2, 0, 0.000001, Rp=0)', code)
+
+    def test_reversed_parallel_voltage_sources_are_warning_not_error(self):
+        model = CircuitModel()
+        for comp_id, comp_type, name in [
+            ("J_A", ComponentType.JUNCTION, "JA"),
+            ("J_B", ComponentType.JUNCTION, "JB"),
+            ("VS_001", ComponentType.VOLTAGE_SOURCE, "VS1"),
+            ("VS_002", ComponentType.VOLTAGE_SOURCE, "VS2"),
+        ]:
+            model.add_component(ComponentInstance(
+                comp_id=comp_id,
+                comp_type=comp_type,
+                name=name,
+                x=0,
+                y=0,
+                pins=create_component_pins(comp_type),
+            ))
+        model.add_wire(Wire("W1", "VS_001", "node_pos", "J_A", "node"))
+        model.add_wire(Wire("W2", "VS_001", "node_neg", "J_B", "node"))
+        model.add_wire(Wire("W3", "VS_002", "node_pos", "J_B", "node"))
+        model.add_wire(Wire("W4", "VS_002", "node_neg", "J_A", "node"))
+
+        errors = CircuitValidator()._check_voltage_source_conflict(model)
+
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0].severity, ValidationSeverity.WARNING)
 
     def test_single_phase_ulm_uses_legacy_pin_names(self):
         model = CircuitModel()
@@ -317,6 +463,48 @@ class RegressionTests(unittest.TestCase):
         canvas.close()
         app.processEvents()
 
+    def test_canvas_group_drag_moves_wire_waypoints_with_selected_endpoints(self):
+        app = get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        canvas.resize(600, 400)
+        canvas.show()
+
+        for comp_id, name, x in [("R_001", "R1", -60), ("C_001", "C1", 60)]:
+            model.add_component(
+                ComponentInstance(
+                    comp_id=comp_id,
+                    comp_type=ComponentType.RESISTOR,
+                    name=name,
+                    x=x,
+                    y=0,
+                    pins=create_component_pins(ComponentType.RESISTOR),
+                )
+            )
+        model.add_wire(Wire("W_ROUTE", "R_001", "nt", "C_001", "nf", [(0.0, -50.0)]))
+        app.processEvents()
+        canvas.centerOn(0, 0)
+        app.processEvents()
+
+        r_item = canvas.component_items["R_001"]
+        c_item = canvas.component_items["C_001"]
+        r_item.setSelected(True)
+        c_item.setSelected(True)
+
+        start = canvas.mapFromScene(r_item.sceneBoundingRect().center())
+        end = start + QPoint(40, 30)
+        QTest.mousePress(canvas.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+        QTest.mouseMove(canvas.viewport(), end)
+        QTest.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
+        app.processEvents()
+
+        dx = model.components["R_001"].x - (-60)
+        dy = model.components["R_001"].y - 0
+        self.assertEqual(model.wires["W_ROUTE"].waypoints, [(0.0 + dx, -50.0 + dy)])
+
+        canvas.close()
+        app.processEvents()
+
     def test_ground_pin_is_at_top_of_symbol(self):
         pins = create_component_pins(ComponentType.GROUND)
 
@@ -380,11 +568,11 @@ class RegressionTests(unittest.TestCase):
             canvas.set_mode(CanvasMode.WIRE)
 
             start = canvas.component_items["R_001"].get_all_scene_pin_positions()["nt"]
-            waypoint = QPointF(0, -50)
             end = canvas.component_items["R_002"].get_all_scene_pin_positions()["nf"]
 
             canvas._handle_wire_left_click(start)
-            canvas._handle_wire_left_click(waypoint)
+            canvas._handle_wire_left_click(QPointF(-50, -40))
+            canvas._handle_wire_left_click(QPointF(70, -45))
             canvas._handle_wire_right_click(end)
 
             wires = list(model.wires.values())
@@ -393,9 +581,412 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(wires[0].from_pin, "nt")
             self.assertEqual(wires[0].to_comp, "R_002")
             self.assertEqual(wires[0].to_pin, "nf")
-            self.assertEqual(wires[0].waypoints, [(0.0, -50.0)])
+            self.assertEqual(wires[0].waypoints, [(-70.0, -40.0), (70.0, -40.0)])
+            points = [start, *[QPointF(x, y) for x, y in wires[0].waypoints], end]
+            for first, second in zip(points, points[1:]):
+                self.assertTrue(
+                    abs(first.x() - second.x()) < 0.1
+                    or abs(first.y() - second.y()) < 0.1
+                )
         finally:
             canvas.close()
+
+    def test_wire_graphics_item_uses_thin_orthogonal_style(self):
+        wire = Wire("W_ROUTE", "R_001", "nt", "C_001", "nf", [(-70.0, -40.0), (70.0, -40.0)])
+        item = WireGraphicsItem(wire, QPointF(-70, 0), QPointF(70, 0))
+
+        points = item._manhattan_points()
+
+        self.assertEqual(item.pen.color(), QColor("#111111"))
+        self.assertLessEqual(item.pen.widthF(), 1.5)
+        self.assertLess(WireGraphicsItem.ENDPOINT_DOT_DIAMETER, 4.0)
+        self.assertGreater(WireGraphicsItem.ENDPOINT_DOT_DIAMETER, item.pen.widthF())
+        self.assertLessEqual(item.selected_pen.widthF(), 2.5)
+        for first, second in zip(points, points[1:]):
+            self.assertTrue(
+                abs(first.x() - second.x()) < 0.1
+                or abs(first.y() - second.y()) < 0.1
+            )
+
+    def test_wire_preview_node_follows_mouse_on_grid_until_wire_finishes(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            r1 = ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=-100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            r2 = ComponentInstance(
+                comp_id="R_002",
+                comp_type=ComponentType.RESISTOR,
+                name="R2",
+                x=100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            model.add_component(r1)
+            model.add_component(r2)
+            canvas.set_mode(CanvasMode.WIRE)
+
+            start = canvas.component_items["R_001"].get_all_scene_pin_positions()["nt"]
+            canvas._handle_wire_left_click(start)
+            canvas._update_temp_wire(QPointF(17, -24))
+
+            self.assertIsNotNone(canvas._temp_wire_node)
+            self.assertEqual(canvas._temp_wire_node.pos(), QPointF(15, 0))
+            self.assertEqual(canvas._temp_line.end_pos, QPointF(15, 0))
+
+            end = canvas.component_items["R_002"].get_all_scene_pin_positions()["nf"]
+            canvas._handle_wire_right_click(end)
+
+            self.assertIsNone(canvas._temp_wire_node)
+        finally:
+            canvas.close()
+
+    def test_wire_start_and_finish_snap_to_nearby_component_pins(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            r1 = ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=-100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            r2 = ComponentInstance(
+                comp_id="R_002",
+                comp_type=ComponentType.RESISTOR,
+                name="R2",
+                x=100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            model.add_component(r1)
+            model.add_component(r2)
+            canvas.set_mode(CanvasMode.WIRE)
+
+            start_pin = canvas.component_items["R_001"].get_all_scene_pin_positions()["nt"]
+            end_pin = canvas.component_items["R_002"].get_all_scene_pin_positions()["nf"]
+            start_click = start_pin + QPointF(15, 0)
+            end_click = end_pin - QPointF(15, 0)
+
+            self.assertFalse(canvas.component_items["R_001"].sceneBoundingRect().contains(start_click))
+            self.assertFalse(canvas.component_items["R_002"].sceneBoundingRect().contains(end_click))
+
+            canvas._handle_wire_left_click(start_click)
+            self.assertEqual(canvas._wiring_start, ("R_001", "nt"))
+            self.assertEqual(canvas._temp_line.start_pos, start_pin)
+
+            canvas._handle_wire_right_click(end_click)
+
+            wires = list(model.wires.values())
+            self.assertEqual(len(wires), 1)
+            self.assertEqual(wires[0].from_comp, "R_001")
+            self.assertEqual(wires[0].from_pin, "nt")
+            self.assertEqual(wires[0].to_comp, "R_002")
+            self.assertEqual(wires[0].to_pin, "nf")
+        finally:
+            canvas.close()
+
+    def test_undo_shortcut_is_ignored_while_component_drag_is_active(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            comp = ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=0,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            model.add_component(comp)
+            item = canvas.component_items["R_001"]
+            item.setSelected(True)
+            item._drag_snapshot = model._snapshot()
+
+            undo_calls = []
+            model.undo = lambda: undo_calls.append(True)
+            event = QKeyEvent(
+                QEvent.Type.KeyPress,
+                Qt.Key.Key_Z,
+                Qt.KeyboardModifier.ControlModifier,
+            )
+
+            canvas.keyPressEvent(event)
+
+            self.assertEqual(undo_calls, [])
+        finally:
+            canvas.close()
+
+    def test_wire_preview_uses_last_confirmed_point_for_axis_choice(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            r1 = ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=-100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            model.add_component(r1)
+            canvas.set_mode(CanvasMode.WIRE)
+
+            start = canvas.component_items["R_001"].get_all_scene_pin_positions()["nt"]
+            canvas._handle_wire_left_click(start)
+            canvas._handle_wire_left_click(QPointF(20, -10))
+            canvas._update_temp_wire(QPointF(25, -75))
+
+            self.assertEqual(canvas._wire_waypoints, [QPointF(20, 0)])
+            self.assertEqual(canvas._temp_line.end_pos, QPointF(20, -75))
+        finally:
+            canvas.close()
+
+    def test_wire_refresh_clears_temporary_line_before_qt_deletes_it(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            r1 = ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=-100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            model.add_component(r1)
+            canvas.set_mode(CanvasMode.WIRE)
+
+            start = canvas.component_items["R_001"].get_all_scene_pin_positions()["nt"]
+            canvas._handle_wire_left_click(start)
+            self.assertIsNotNone(canvas._temp_line)
+
+            canvas._refresh_view()
+
+            self.assertIsNone(canvas._temp_line)
+            self.assertIsNone(canvas._temp_wire_node)
+            self.assertIsNone(canvas._wiring_start)
+            self.assertEqual(canvas.mode, CanvasMode.WIRE)
+            canvas._update_temp_wire(QPointF(20, 0))
+        finally:
+            canvas.close()
+
+    def test_canvas_snap_and_visual_grid_use_five_pixels(self):
+        self.assertEqual(CircuitCanvas.GRID_SIZE, 5)
+        self.assertEqual(CircuitCanvas.GRID_VISUAL_SIZE, 5)
+
+    def test_wire_right_click_on_empty_space_finishes_at_preview_junction(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            r1 = ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=-100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            model.add_component(r1)
+            canvas.set_mode(CanvasMode.WIRE)
+
+            start = canvas.component_items["R_001"].get_all_scene_pin_positions()["nt"]
+            canvas._handle_wire_left_click(start)
+            canvas._handle_wire_right_click(QPointF(17, -24))
+
+            junctions = [
+                comp for comp in model.components.values()
+                if comp.comp_type == ComponentType.JUNCTION
+            ]
+            self.assertEqual(len(junctions), 1)
+            self.assertEqual((junctions[0].x, junctions[0].y), (15, 0))
+            self.assertEqual(len(model.wires), 1)
+            self.assertIsNone(canvas._wiring_start)
+            self.assertIsNone(canvas._temp_wire_node)
+            self.assertEqual(canvas.mode, CanvasMode.WIRE)
+        finally:
+            canvas.close()
+
+    def test_wire_waypoints_are_selectable_and_box_selectable(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            r1 = ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=-100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            r2 = ComponentInstance(
+                comp_id="R_002",
+                comp_type=ComponentType.RESISTOR,
+                name="R2",
+                x=100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            model.add_component(r1)
+            model.add_component(r2)
+            model.add_wire(Wire("W_ROUTE", "R_001", "nt", "R_002", "nf", [(-70.0, -40.0), (70.0, -40.0)]))
+
+            waypoint_items = getattr(canvas, "wire_waypoint_items", {})
+            self.assertEqual(len(waypoint_items), 2)
+            handle = waypoint_items[("W_ROUTE", 0)]
+            self.assertTrue(handle.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
+            self.assertTrue(handle.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
+            self.assertLessEqual(handle.boundingRect().width(), 6)
+            self.assertLessEqual(handle.boundingRect().height(), 6)
+
+            image = QImage(20, 20, QImage.Format.Format_ARGB32)
+            image.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(image)
+            painter.translate(10, 10)
+            handle.paint(painter, None)
+            painter.end()
+            self.assertEqual(image.pixelColor(10, 10).alpha(), 0)
+
+            canvas.scene.clearSelection()
+            path = QPainterPath()
+            path.addRect(handle.sceneBoundingRect().adjusted(-1, -1, 1, 1))
+            canvas.scene.setSelectionArea(path)
+
+            self.assertTrue(handle.isSelected())
+        finally:
+            canvas.close()
+
+    def test_wire_intersections_have_small_black_dots(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            for comp_id, x, y in [
+                ("J_L", -50, 0),
+                ("J_R", 50, 0),
+                ("J_T", 0, -50),
+                ("J_B", 0, 50),
+            ]:
+                model.add_component(
+                    ComponentInstance(
+                        comp_id=comp_id,
+                        comp_type=ComponentType.JUNCTION,
+                        name=comp_id,
+                        x=x,
+                        y=y,
+                        pins=create_component_pins(ComponentType.JUNCTION),
+                    )
+                )
+            model.add_wire(Wire("W_H", "J_L", "node", "J_R", "node"))
+            model.add_wire(Wire("W_V", "J_T", "node", "J_B", "node"))
+
+            intersection_items = getattr(canvas, "wire_intersection_items", [])
+            self.assertEqual(len(intersection_items), 1)
+            dot = intersection_items[0]
+            self.assertEqual(dot.sceneBoundingRect().center(), QPointF(0, 0))
+            self.assertLessEqual(dot.sceneBoundingRect().width(), WireGraphicsItem.ENDPOINT_DOT_DIAMETER + 0.1)
+            self.assertLessEqual(dot.sceneBoundingRect().height(), WireGraphicsItem.ENDPOINT_DOT_DIAMETER + 0.1)
+            self.assertEqual(dot.brush().color(), QColor("#111111"))
+        finally:
+            canvas.close()
+
+    def test_wire_waypoint_drag_updates_adjacent_segments_orthogonally(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            r1 = ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=-100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            r2 = ComponentInstance(
+                comp_id="R_002",
+                comp_type=ComponentType.RESISTOR,
+                name="R2",
+                x=100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            model.add_component(r1)
+            model.add_component(r2)
+            model.add_wire(Wire("W_ROUTE", "R_001", "nt", "R_002", "nf", [(-70.0, -40.0), (70.0, -40.0)]))
+
+            handle = getattr(canvas, "wire_waypoint_items", {})[("W_ROUTE", 0)]
+            handle.setPos(QPointF(-70, -65))
+
+            self.assertEqual(model.wires["W_ROUTE"].waypoints, [(-70.0, -65.0), (70.0, -65.0)])
+            self.assertEqual(getattr(canvas, "wire_waypoint_items", {})[("W_ROUTE", 1)].pos(), QPointF(70, -65))
+            points = canvas.wire_items["W_ROUTE"]._manhattan_points()
+            for first, second in zip(points, points[1:]):
+                self.assertTrue(
+                    abs(first.x() - second.x()) < 0.1
+                    or abs(first.y() - second.y()) < 0.1
+                )
+        finally:
+            canvas.close()
+
+    def test_wire_waypoint_drag_can_be_undone(self):
+        app = get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        canvas.resize(600, 400)
+        canvas.show()
+        try:
+            r1 = ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=-100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            r2 = ComponentInstance(
+                comp_id="R_002",
+                comp_type=ComponentType.RESISTOR,
+                name="R2",
+                x=100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            model.add_component(r1)
+            model.add_component(r2)
+            model.add_wire(Wire("W_ROUTE", "R_001", "nt", "R_002", "nf", [(-70.0, -40.0), (70.0, -40.0)]))
+            canvas.centerOn(0, 0)
+            app.processEvents()
+
+            handle = getattr(canvas, "wire_waypoint_items", {})[("W_ROUTE", 0)]
+            start = canvas.mapFromScene(handle.scenePos())
+            end = canvas.mapFromScene(QPointF(-70, -65))
+            QTest.mousePress(canvas.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+            QTest.mouseMove(canvas.viewport(), end)
+            QTest.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
+            app.processEvents()
+
+            self.assertEqual(model.wires["W_ROUTE"].waypoints, [(-70.0, -65.0), (70.0, -65.0)])
+            self.assertTrue(model.undo())
+            self.assertEqual(model.wires["W_ROUTE"].waypoints, [(-70.0, -40.0), (70.0, -40.0)])
+        finally:
+            canvas.close()
+            app.processEvents()
 
     def test_pscad_wire_mode_can_finish_on_existing_wire_midpoint(self):
         get_app()
@@ -434,6 +1025,7 @@ class RegressionTests(unittest.TestCase):
             start = canvas.component_items["R_003"].get_all_scene_pin_positions()["nf"]
             midpoint = QPointF(0, 0)
             canvas._handle_wire_left_click(start)
+            canvas._handle_wire_left_click(QPointF(-30, 0))
             canvas._handle_wire_right_click(midpoint)
 
             junction_type = getattr(ComponentType, "JUNCTION")
@@ -686,6 +1278,7 @@ class RegressionTests(unittest.TestCase):
 
             start = canvas.component_items["R_IN_TAP"].get_all_scene_pin_positions()["nf"]
             canvas._handle_wire_left_click(start)
+            canvas._handle_wire_left_click(QPointF(-30, 0))
             canvas._handle_wire_right_click(QPointF(0, 0))
 
             junction_type = getattr(ComponentType, "JUNCTION")
@@ -845,6 +1438,21 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(len(fake_solver.kwargs["nodes_m"]), 4)
         self.assertEqual(fake_solver.kwargs["length"], 1200.0)
         self.assertFalse(fake_solver.kwargs["force_rebuild"])
+
+    def test_custom_source_expression_uses_restricted_eval(self):
+        builder = SolverBuilder()
+
+        func = builder._build_source_func({
+            "mode": "custom",
+            "expression": "lambda t: sin(t) + np.cos(t)",
+        })
+
+        self.assertAlmostEqual(func(0.0), 1.0)
+        with self.assertRaises(ValueError):
+            builder._build_source_func({
+                "mode": "custom",
+                "expression": "lambda t: ().__class__.__mro__",
+            })
 
     def test_canvas_places_lcp_ohl_with_phase_and_ground_wire_pins(self):
         get_app()
@@ -1133,6 +1741,188 @@ class RegressionTests(unittest.TestCase):
         self.assertGreater(probes[0].node_neg, 0)
         self.assertNotEqual(probes[0].node_pos, probes[0].node_neg)
 
+    def test_user_voltage_probe_prevents_duplicate_auto_probe(self):
+        model = CircuitModel()
+        r1 = ComponentInstance(
+            comp_id="R_001",
+            comp_type=ComponentType.RESISTOR,
+            name="R1",
+            x=0,
+            y=0,
+            pins=create_component_pins(ComponentType.RESISTOR),
+        )
+        gnd = ComponentInstance(
+            comp_id="GND_001",
+            comp_type=ComponentType.GROUND,
+            name="GND",
+            x=0,
+            y=0,
+            pins=create_component_pins(ComponentType.GROUND),
+        )
+        model.add_component(r1)
+        model.add_component(gnd)
+        model.add_wire(Wire("W_GND", "R_001", "nt", "GND_001", "gnd"))
+
+        node_id = model.assign_node_ids()[("R_001", "nf")]
+        model.probes.append(ProbeConfig(
+            probe_id="USER_V",
+            probe_type="voltage",
+            node_pos=node_id,
+            node_neg=0,
+        ))
+        model.settings.auto_voltage_probes = True
+
+        auto_ids = {p.probe_id for p in model.get_auto_voltage_probes()}
+
+        self.assertNotIn(f"auto_V_n{node_id}", auto_ids)
+
+    def test_auto_voltage_probe_setting_defaults_and_round_trips(self):
+        settings = CircuitModel().settings
+
+        self.assertTrue(hasattr(settings, "auto_voltage_probes"))
+        self.assertFalse(settings.auto_voltage_probes)
+
+        serialized = settings.to_dict()
+        self.assertIn("auto_voltage_probes", serialized)
+        self.assertFalse(serialized["auto_voltage_probes"])
+        self.assertFalse(SimSettings.from_dict({}).auto_voltage_probes)
+        self.assertTrue(
+            SimSettings.from_dict({"auto_voltage_probes": True}).auto_voltage_probes
+        )
+
+    def test_auto_voltage_probe_generation_uses_dedicated_setting(self):
+        model = CircuitModel()
+        r1 = ComponentInstance(
+            comp_id="R_001",
+            comp_type=ComponentType.RESISTOR,
+            name="R1",
+            x=0,
+            y=0,
+            pins=create_component_pins(ComponentType.RESISTOR),
+        )
+        c1 = ComponentInstance(
+            comp_id="C_001",
+            comp_type=ComponentType.CAPACITOR,
+            name="C1",
+            x=0,
+            y=0,
+            pins=create_component_pins(ComponentType.CAPACITOR),
+        )
+        gnd = ComponentInstance(
+            comp_id="GND_001",
+            comp_type=ComponentType.GROUND,
+            name="GND",
+            x=0,
+            y=0,
+            pins=create_component_pins(ComponentType.GROUND),
+        )
+        probe = ComponentInstance(
+            comp_id="PRB_001",
+            comp_type=ComponentType.PROBE,
+            name="PRB1",
+            x=0,
+            y=0,
+            params={"probe_type": "voltage_ground", "unit": "kV"},
+            pins=create_component_pins(ComponentType.PROBE),
+        )
+
+        for comp in (r1, c1, gnd, probe):
+            model.add_component(comp)
+        model.add_wire(Wire("W_PROBE", "PRB_001", "sense", "R_001", "nf"))
+        model.add_wire(Wire("W_GND", "R_001", "nt", "GND_001", "gnd"))
+
+        node_map = model.assign_node_ids()
+        explicit_node = node_map[("R_001", "nf")]
+        uncovered_node = node_map[("C_001", "nf")]
+
+        probe_ids = {p.probe_id for p in model.get_auto_voltage_probes()}
+
+        self.assertIn(f"PRB1_V_n{explicit_node}", probe_ids)
+        self.assertNotIn(f"auto_V_n{uncovered_node}", probe_ids)
+
+        model.update_settings(auto_voltage_probes=True)
+        probe_ids = {p.probe_id for p in model.get_auto_voltage_probes()}
+        self.assertIn(f"auto_V_n{uncovered_node}", probe_ids)
+
+        model.update_settings(result_mode="full")
+        probe_ids = {p.probe_id for p in model.get_auto_voltage_probes()}
+        self.assertIn(f"auto_V_n{uncovered_node}", probe_ids)
+
+    def test_simulation_config_auto_probe_checkbox_updates_setting_only(self):
+        app = get_app()
+        model = CircuitModel()
+        panel = main_window_module.SimulationConfigPanel(model)
+        try:
+            self.assertTrue(hasattr(panel, "auto_vprobe_check"))
+            self.assertFalse(panel.auto_vprobe_check.isChecked())
+
+            original_result_mode = model.settings.result_mode
+            panel.auto_vprobe_check.setChecked(True)
+
+            self.assertTrue(model.settings.auto_voltage_probes)
+            self.assertEqual(model.settings.result_mode, original_result_mode)
+
+            model.settings.auto_voltage_probes = False
+            panel.sync_from_model()
+            self.assertFalse(panel.auto_vprobe_check.isChecked())
+        finally:
+            panel.close()
+            app.processEvents()
+
+    def test_probe_panel_auto_probe_checkbox_updates_setting_only(self):
+        app = get_app()
+        model = CircuitModel()
+        model.update_settings(result_mode="full")
+        panel = ProbePanel(model)
+        try:
+            self.assertFalse(panel.auto_probe_check.isChecked())
+
+            panel.auto_probe_check.setChecked(True)
+
+            self.assertTrue(getattr(model.settings, "auto_voltage_probes", False))
+            self.assertEqual(model.settings.result_mode, "full")
+
+            panel.auto_probe_check.setChecked(False)
+
+            self.assertFalse(model.settings.auto_voltage_probes)
+            self.assertEqual(model.settings.result_mode, "full")
+        finally:
+            panel.close()
+            app.processEvents()
+
+    def test_model_tracks_selected_components(self):
+        model = CircuitModel()
+        r1 = ComponentInstance(
+            comp_id="R_001",
+            comp_type=ComponentType.RESISTOR,
+            name="R1",
+            x=0,
+            y=0,
+            pins=create_component_pins(ComponentType.RESISTOR),
+        )
+        c1 = ComponentInstance(
+            comp_id="C_001",
+            comp_type=ComponentType.CAPACITOR,
+            name="C1",
+            x=80,
+            y=0,
+            pins=create_component_pins(ComponentType.CAPACITOR),
+        )
+        model.add_component(r1)
+        model.add_component(c1)
+
+        model.select_component("R_001")
+        self.assertEqual([c.comp_id for c in model.get_selected_components()], ["R_001"])
+
+        model.select_components(["R_001", "C_001", "MISSING"])
+        self.assertEqual(
+            [c.comp_id for c in model.get_selected_components()],
+            ["R_001", "C_001"],
+        )
+
+        model.clear_selection()
+        self.assertEqual(model.get_selected_components(), [])
+
     def test_sim_runner_detects_step_callback_support(self):
         from core.sim_runner import solver_supports_step_callback
 
@@ -1146,6 +1936,23 @@ class RegressionTests(unittest.TestCase):
 
         self.assertTrue(solver_supports_step_callback(WithCallback()))
         self.assertFalse(solver_supports_step_callback(WithoutCallback()))
+
+    def test_sim_runner_uses_model_snapshot_copy(self):
+        model = CircuitModel()
+        model.add_component(ComponentInstance(
+            comp_id="R_001",
+            comp_type=ComponentType.RESISTOR,
+            name="R1",
+            x=0,
+            y=0,
+            pins=create_component_pins(ComponentType.RESISTOR),
+        ))
+
+        runner = SimulationRunner(model)
+        runner.model.components["R_001"].x = 123
+
+        self.assertIsNot(runner.model, model)
+        self.assertEqual(model.components["R_001"].x, 0)
 
     def test_solver_builder_has_no_dead_wire_type_assignment(self):
         with open("core/solver_builder.py", "r", encoding="utf-8") as f:

@@ -128,21 +128,26 @@ class CircuitValidator:
 
         node_map = model.assign_node_ids()
 
-        # 收集所有电压源的节点对
-        vs_nodes: Dict[tuple, List[str]] = {}  # (pos, neg) -> [comp_names]
+        # 收集所有电压源的有序节点对
+        vs_nodes: Dict[tuple, List[tuple]] = {}
         for comp in model.components.values():
             if comp.comp_type == ComponentType.VOLTAGE_SOURCE:
                 pos = node_map.get((comp.comp_id, 'node_pos'), 0)
                 neg = node_map.get((comp.comp_id, 'node_neg'), 0)
                 key = (min(pos, neg), max(pos, neg))
-                if key not in vs_nodes:
-                    vs_nodes[key] = []
-                vs_nodes[key].append(comp.name)
+                vs_nodes.setdefault(key, []).append((comp.name, pos, neg))
 
-        for key, names in vs_nodes.items():
-            if len(names) > 1:
+        for key, sources in vs_nodes.items():
+            if len(sources) > 1:
+                names = [name for name, _, _ in sources]
+                polarities = {(pos, neg) for _, pos, neg in sources}
+                severity = (
+                    ValidationSeverity.ERROR
+                    if len(polarities) == 1
+                    else ValidationSeverity.WARNING
+                )
                 errors.append(ValidationError(
-                    severity=ValidationSeverity.ERROR,
+                    severity=severity,
                     component_id=None,
                     field="circuit",
                     message=f"电压源 {', '.join(names)} 并联在同一对节点上，可能冲突",

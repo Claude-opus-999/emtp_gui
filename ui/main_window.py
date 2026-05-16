@@ -3,6 +3,8 @@ EMTP 电路仿真 GUI - 主窗口
 包含菜单栏、工具栏、元件面板、属性编辑器、仿真配置、代码预览、波形显示、控制台
 """
 
+import re
+
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QDockWidget, QStatusBar, QMenuBar, QToolBar,
@@ -16,7 +18,7 @@ from PySide6.QtCore import Qt, QSize, QPointF, Signal, QRegularExpression
 from PySide6.QtGui import (
     QAction, QKeySequence, QCloseEvent,
     QFont, QTextCharFormat, QColor, QSyntaxHighlighter,
-    QTextDocument,
+    QTextDocument, QValidator,
 )
 
 from models.circuit_model import (
@@ -121,13 +123,17 @@ class PythonHighlighter(QSyntaxHighlighter):
 # ---------------------------------------------------------------------------
 
 class ScientificSpinBox(QDoubleSpinBox):
-    """支持科学计数法显示的 QDoubleSpinBox"""
+    """QDoubleSpinBox that accepts compact scientific notation while typing."""
+
+    _ACCEPTABLE_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+    _INTERMEDIATE_RE = re.compile(r"^[+-]?(?:(?:\d+(?:\.\d*)?|\.\d*)?(?:[eE][+-]?\d*)?)?$")
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setRange(1e-15, 1e6)
         self.setDecimals(12)
         self.setMinimumWidth(130)
+        self.setKeyboardTracking(False)
 
     def textFromValue(self, val: float) -> str:
         if val == 0:
@@ -141,6 +147,17 @@ class ScientificSpinBox(QDoubleSpinBox):
             return float(text.replace(',', ''))
         except ValueError:
             return self.value()
+
+    def validate(self, text: str, pos: int):
+        candidate = text.strip().replace(',', '')
+        if self._ACCEPTABLE_RE.fullmatch(candidate):
+            value = float(candidate)
+            if self.minimum() <= value <= self.maximum():
+                return (QValidator.State.Acceptable, text, pos)
+            return (QValidator.State.Intermediate, text, pos)
+        if self._INTERMEDIATE_RE.fullmatch(candidate):
+            return (QValidator.State.Intermediate, text, pos)
+        return (QValidator.State.Invalid, text, pos)
 
 
 # ---------------------------------------------------------------------------
@@ -1188,6 +1205,17 @@ class SimulationConfigPanel(QWidget):
         self.verbose_check.toggled.connect(self._on_verbose_changed)
         layout.addWidget(self.verbose_check)
 
+        self.auto_vprobe_check = QCheckBox("自动为所有非地节点添加电压探针")
+        self.auto_vprobe_check.setToolTip(
+            "勾选后，仿真将自动为所有非接地节点记录电压波形。\n"
+            "不勾选时，仅记录画布上放置的探针和自定义探针。"
+        )
+        self.auto_vprobe_check.setChecked(self.model.settings.auto_voltage_probes)
+        self.auto_vprobe_check.toggled.connect(
+            lambda checked: self.model.update_settings(auto_voltage_probes=checked)
+        )
+        layout.addWidget(self.auto_vprobe_check)
+
         # 高级设置（折叠面板）
         advanced_group = QGroupBox("高级设置")
         advanced_group.setCheckable(True)
@@ -1269,6 +1297,10 @@ class SimulationConfigPanel(QWidget):
         self.verbose_check.blockSignals(True)
         self.verbose_check.setChecked(self.model.settings.verbose)
         self.verbose_check.blockSignals(False)
+
+        self.auto_vprobe_check.blockSignals(True)
+        self.auto_vprobe_check.setChecked(self.model.settings.auto_voltage_probes)
+        self.auto_vprobe_check.blockSignals(False)
 
         # 高级设置同步
         self.result_mode_combo.blockSignals(True)
@@ -1698,6 +1730,7 @@ class MainWindow(QMainWindow):
         # 数据模型
         self.model = CircuitModel()
         self.current_file = None
+        self._last_sim_results = None
 
         # 初始化 UI
         self._setup_ui()
@@ -1905,40 +1938,6 @@ class MainWindow(QMainWindow):
         self.wire_btn.clicked.connect(self._on_toggle_wire_mode)
         toolbar.addWidget(self.wire_btn)
 
-        # 接地
-        ground_btn = QPushButton("⏚ 接地")
-        ground_btn.setToolTip("添加接地 (Ctrl+G)")
-        ground_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #f8fafc; border: 1px solid #e2e8f0;
-                border-radius: 4px; padding: 6px 12px;
-            }
-            QPushButton:hover { background-color: #e2e8f0; border-color: #94a3b8; }
-        """)
-        ground_btn.clicked.connect(self._on_add_ground)
-        toolbar.addWidget(ground_btn)
-
-        toolbar.addSeparator()
-
-        # 旋转
-        rotate_btn = QPushButton("🔄 旋转")
-        rotate_btn.setToolTip("旋转元件 (Ctrl+R)")
-        rotate_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #f8fafc; border: 1px solid #e2e8f0;
-                border-radius: 4px; padding: 6px 12px;
-            }
-            QPushButton:hover { background-color: #e2e8f0; border-color: #94a3b8; }
-        """)
-        rotate_btn.clicked.connect(self._on_rotate)
-        toolbar.addWidget(rotate_btn)
-
-        # 删除
-        toolbar.addWidget(self._tool_button("删除 (Del)", "删除", self._on_delete))
-
-        # 清空
-        toolbar.addWidget(self._tool_button("清空电路", "清空", self._on_clear))
-
     # FIX #3: _tool_button returns QPushButton, not QLabel
     @staticmethod
     def _tool_button(tooltip: str, text: str, slot) -> QPushButton:
@@ -2054,9 +2053,6 @@ class MainWindow(QMainWindow):
 
             # 更新 canvas 的 model 引用
             self.canvas.model = self.model
-            self.canvas._on_model_changed = self.canvas.__class__._on_model_changed.__get__(
-                self.canvas, type(self.canvas)
-            )
             self.model.add_observer(self.canvas._on_model_changed)
 
             # 刷新各面板
@@ -2278,6 +2274,8 @@ class MainWindow(QMainWindow):
         self._sim_runner = SimulationRunner(self.model, parent=self)
         self._sim_runner.progress.connect(self._on_sim_progress)
         self._sim_runner.progress_pct.connect(self._on_sim_progress_pct)
+        self._sim_runner.log_received.connect(self._on_sim_log)
+        self._sim_runner.results_ready.connect(self._on_sim_results)
         self._sim_runner.finished_ok.connect(self._on_sim_finished)
         self._sim_runner.error.connect(self._on_sim_error)
         self._set_running_ui(True)
@@ -2333,6 +2331,19 @@ class MainWindow(QMainWindow):
         self.console_panel.append_text(f">>> 仿真出错:\n{error_msg}")
         QMessageBox.critical(self, "仿真错误", f"仿真出错:\n{error_msg[:200]}...")
         self.status_label.setText("仿真出错")
+
+    def _on_sim_log(self, msg: str):
+        """浠跨湡鏃ュ織鍥炶皟锛堝湪涓荤嚎绋嬩腑璋冪敤锛?"""
+        if msg:
+            self.console_panel.append_text(msg)
+
+    def _on_sim_results(self, results: dict):
+        """缂撳瓨浠跨湡搴忓垪鍖栫粨鏋滐紝渚涘鍑烘垨鍚庣画鏌ョ湅銆?"""
+        self._last_sim_results = results
+        n_probes = len(results.get("probes", {}))
+        self.console_panel.append_text(f">>> received serialized data for {n_probes} probes")
+        if results.get("timing"):
+            self.console_panel.append_text(">>> timing stats cached")
 
     def _on_sim_settings(self):
         """聚焦到仿真配置面板"""
