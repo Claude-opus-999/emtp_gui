@@ -5,6 +5,7 @@ EMTP 电路仿真 GUI - 电路画布
 """
 
 import copy
+import uuid
 
 from shiboken6 import isValid
 from PySide6.QtWidgets import (QGraphicsView, QGraphicsScene, QGraphicsItem,
@@ -550,6 +551,11 @@ class ComponentGraphicsItem(QGraphicsItem):
         if change == QGraphicsItem.ItemPositionHasChanged:
             if self._drag_snapshot is not None:
                 self._drag_started = True
+            if (
+                self.canvas is not None
+                and self.component.comp_id in self.canvas._component_drag_selected_ids
+            ):
+                self.canvas._update_connected_wires_during_component_drag()
         return super().itemChange(change, value)
 
     def _snap_pos(self, pos: QPointF) -> QPointF:
@@ -597,11 +603,53 @@ class WireGraphicsItem(QGraphicsItem):
         end_pos: QPointF,
     ) -> List[QPointF]:
         """Return the route through explicit user-created waypoint anchors."""
-        anchors = [QPointF(point) for point in waypoints]
-        points = [QPointF(start_pos)]
-        for target in [*anchors, QPointF(end_pos)]:
-            cls._append_unique(points, target)
-        return points
+        return cls._repair_points_for_drawing(
+            [QPointF(start_pos), *[QPointF(point) for point in waypoints], QPointF(end_pos)]
+        )
+
+    @classmethod
+    def _repair_points_for_drawing(cls, points: List[QPointF]) -> List[QPointF]:
+        if not points:
+            return []
+
+        result = [QPointF(points[0])]
+        for target in points[1:]:
+            last = result[-1]
+            if cls._same_point(last, target):
+                continue
+            if abs(last.x() - target.x()) <= 0.1 or abs(last.y() - target.y()) <= 0.1:
+                result.append(QPointF(target))
+                continue
+
+            bend = QPointF(target.x(), last.y())
+            cls._append_unique(result, bend)
+            cls._append_unique(result, target)
+
+        return cls._collapse_collinear_for_drawing(result)
+
+    @classmethod
+    def _collapse_collinear_for_drawing(cls, points: List[QPointF]) -> List[QPointF]:
+        if len(points) <= 2:
+            return points
+
+        result = [QPointF(points[0])]
+        for index in range(1, len(points) - 1):
+            prev = result[-1]
+            curr = points[index]
+            next_point = points[index + 1]
+            horizontal = (
+                abs(prev.y() - curr.y()) <= 0.1
+                and abs(curr.y() - next_point.y()) <= 0.1
+            )
+            vertical = (
+                abs(prev.x() - curr.x()) <= 0.1
+                and abs(curr.x() - next_point.x()) <= 0.1
+            )
+            if horizontal or vertical:
+                continue
+            result.append(QPointF(curr))
+        result.append(QPointF(points[-1]))
+        return result
 
     @classmethod
     def orthogonal_waypoints(
@@ -614,30 +662,12 @@ class WireGraphicsItem(QGraphicsItem):
         return [(float(point.x()), float(point.y())) for point in points[1:-1]]
 
     def _manhattan_points(self) -> list:
-        """计算 Manhattan 折线路径的关键点列表（只含水平/垂直线段）"""
-        if self.wire.waypoints:
-            return self._orthogonal_points(
-                self.start_pos,
-                [QPointF(float(x), float(y)) for x, y in self.wire.waypoints],
-                self.end_pos,
-            )
-        return [self.start_pos, self.end_pos]
-
-        sx, sy = self.start_pos.x(), self.start_pos.y()
-        ex, ey = self.end_pos.x(), self.end_pos.y()
-
-        # 同一水平线或垂直线 → 直线
-        if abs(sx - ex) < 1 or abs(sy - ey) < 1:
-            return [self.start_pos, self.end_pos]
-
-        # L 形折线：先水平到中点，再垂直到终点
-        mid_x = (sx + ex) / 2
-        return [
+        """??? Manhattan ???????????????????????????????"""
+        return self._orthogonal_points(
             self.start_pos,
-            QPointF(mid_x, sy),   # 水平段终点
-            QPointF(mid_x, ey),   # 垂直段终点
+            [QPointF(float(x), float(y)) for x, y in self.wire.waypoints],
             self.end_pos,
-        ]
+        )
 
     def _path(self) -> QPainterPath:
         pts = self._manhattan_points()
@@ -871,6 +901,8 @@ class CircuitCanvas(QGraphicsView):
         self._placing_type: Optional[ComponentType] = None
         self._placing_params: Dict[str, object] = {}
         self._wiring_start: Optional[Tuple[str, str]] = None  # (comp_id, pin_name)
+        self._wire_start_pos: Optional[QPointF] = None
+        self._wire_start_wire_id: Optional[str] = None
         self._wire_waypoints: List[QPointF] = []
         self._temp_line: Optional[WireGraphicsItem] = None
         self._temp_wire_node: Optional[QGraphicsEllipseItem] = None
@@ -878,6 +910,7 @@ class CircuitCanvas(QGraphicsView):
         self._middle_pan_last_pos: Optional[QPoint] = None
         self._component_drag_selected_ids: set = set()
         self._component_drag_start_positions: Dict[str, Tuple[int, int]] = {}
+        self._component_drag_wire_snapshot: Dict[str, Dict[str, object]] = {}
 
         # 子电路编辑模式
         self._editing_subcircuit: Optional[str] = None  # 当前正在编辑的子电路名
@@ -889,8 +922,8 @@ class CircuitCanvas(QGraphicsView):
         self.wire_waypoint_items: Dict[Tuple[str, int], WireWaypointGraphicsItem] = {}
         self.wire_intersection_items: List[QGraphicsEllipseItem] = []
 
-        # 复制粘贴剪贴板
-        self._clipboard: Optional[Dict[str, ComponentInstance]] = None
+        # 复制粘贴剪贴板 — 同时保存元件和它们之间的连线
+        self._clipboard: Optional[Dict] = None  # {'components': {...}, 'wires': {...}}
 
         # 监听模型变化
         self.model.add_observer(self._on_model_changed)
@@ -1086,6 +1119,106 @@ class CircuitCanvas(QGraphicsView):
         elif orientation == "horizontal":
             point.setY(value)
 
+    @staticmethod
+    def _strict_segment_orientation(first: QPointF, second: QPointF) -> Optional[str]:
+        dx = abs(first.x() - second.x())
+        dy = abs(first.y() - second.y())
+        if dx <= 0.1 and dy <= 0.1:
+            return None
+        if dx <= 0.1:
+            return "vertical"
+        if dy <= 0.1:
+            return "horizontal"
+        return None
+
+    @staticmethod
+    def _point_delta(old_point: QPointF, new_point: QPointF) -> Tuple[float, float]:
+        return (
+            float(new_point.x() - old_point.x()),
+            float(new_point.y() - old_point.y()),
+        )
+
+    @staticmethod
+    def _same_delta(first: Tuple[float, float], second: Tuple[float, float]) -> bool:
+        return abs(first[0] - second[0]) <= 0.1 and abs(first[1] - second[1]) <= 0.1
+
+    def _orthogonal_route_between(self, start: QPointF, end: QPointF) -> List[QPointF]:
+        if self._same_wire_point(start, end):
+            return [QPointF(start)]
+        if abs(start.x() - end.x()) <= 0.1 or abs(start.y() - end.y()) <= 0.1:
+            return [QPointF(start), QPointF(end)]
+        return [QPointF(start), QPointF(end.x(), start.y()), QPointF(end)]
+
+    def _repair_orthogonal_points(self, points: List[QPointF]) -> List[QPointF]:
+        if not points:
+            return []
+
+        result = [QPointF(points[0])]
+        for target in points[1:]:
+            last = result[-1]
+            if self._same_wire_point(last, target):
+                continue
+            if abs(last.x() - target.x()) <= 0.1 or abs(last.y() - target.y()) <= 0.1:
+                result.append(QPointF(target))
+                continue
+
+            bend = QPointF(target.x(), last.y())
+            if not self._same_wire_point(last, bend):
+                result.append(bend)
+            if not self._same_wire_point(bend, target):
+                result.append(QPointF(target))
+
+        return self._normalize_wire_points(result)
+
+    def _points_to_waypoints(self, points: List[QPointF]) -> List[tuple]:
+        normalized = self._normalize_wire_points(points)
+        if len(normalized) <= 2:
+            return []
+        return self._wire_point_tuples(normalized[1:-1])
+
+    def _reroute_wire_after_endpoint_move(
+        self,
+        old_start: QPointF,
+        old_end: QPointF,
+        old_waypoints: List[QPointF],
+        new_start: QPointF,
+        new_end: QPointF,
+    ) -> List[QPointF]:
+        start_moved = not self._same_wire_point(old_start, new_start)
+        end_moved = not self._same_wire_point(old_end, new_end)
+
+        if not old_waypoints:
+            return self._orthogonal_route_between(new_start, new_end)
+
+        start_delta = self._point_delta(old_start, new_start)
+        end_delta = self._point_delta(old_end, new_end)
+        if start_moved and end_moved and self._same_delta(start_delta, end_delta):
+            dx, dy = start_delta
+            return self._normalize_wire_points([
+                QPointF(new_start),
+                *[QPointF(point.x() + dx, point.y() + dy) for point in old_waypoints],
+                QPointF(new_end),
+            ])
+
+        old_points = [QPointF(old_start), *[QPointF(point) for point in old_waypoints], QPointF(old_end)]
+        points = [QPointF(new_start), *[QPointF(point) for point in old_waypoints], QPointF(new_end)]
+
+        if start_moved and len(points) >= 3:
+            old_first_orientation = self._strict_segment_orientation(old_points[0], old_points[1])
+            if old_first_orientation == "horizontal":
+                points[1].setY(new_start.y())
+            elif old_first_orientation == "vertical":
+                points[1].setX(new_start.x())
+
+        if end_moved and len(points) >= 3:
+            old_last_orientation = self._strict_segment_orientation(old_points[-2], old_points[-1])
+            if old_last_orientation == "horizontal":
+                points[-2].setY(new_end.y())
+            elif old_last_orientation == "vertical":
+                points[-2].setX(new_end.x())
+
+        return self._repair_orthogonal_points(points)
+
     def _sync_wire_waypoint_items(self, wire: Wire, moving_item: Optional[WireWaypointGraphicsItem] = None):
         for index in range(len(wire.waypoints)):
             item = self.wire_waypoint_items.get((wire.wire_id, index))
@@ -1167,42 +1300,75 @@ class CircuitCanvas(QGraphicsView):
             for comp_id in selected_ids
             if comp_id in active_components
         }
+        self._component_drag_wire_snapshot = {}
+        for wire in self._active_wires().values():
+            if wire.from_comp not in selected_ids and wire.to_comp not in selected_ids:
+                continue
+            old_start, old_end = self._wire_endpoint_positions(wire)
+            if old_start is None or old_end is None:
+                continue
+            self._component_drag_wire_snapshot[wire.wire_id] = {
+                "old_start": QPointF(old_start),
+                "old_end": QPointF(old_end),
+                "old_waypoints": [
+                    QPointF(float(x), float(y))
+                    for x, y in wire.waypoints
+                ],
+            }
+
+    def _update_connected_wires_during_component_drag(self):
+        if not self._component_drag_wire_snapshot:
+            return
+
+        active_wires = self._active_wires()
+        for wire_id, snapshot in self._component_drag_wire_snapshot.items():
+            wire = active_wires.get(wire_id)
+            if wire is None:
+                continue
+
+            new_start, new_end = self._wire_endpoint_positions(wire)
+            if new_start is None or new_end is None:
+                continue
+
+            new_points = self._reroute_wire_after_endpoint_move(
+                old_start=snapshot["old_start"],
+                old_end=snapshot["old_end"],
+                old_waypoints=snapshot["old_waypoints"],
+                new_start=new_start,
+                new_end=new_end,
+            )
+            wire.waypoints = self._points_to_waypoints(new_points)
+
+            wire_item = self.wire_items.get(wire.wire_id)
+            if wire_item is not None and isValid(wire_item):
+                wire_item.update_positions(start_pos=new_start, end_pos=new_end)
+
+            self._sync_wire_waypoint_items(wire)
+
+        self._refresh_wire_intersections()
+        self.canvas_changed.emit()
 
     def _finish_component_drag_waypoints(self, apply: bool):
-        """Move wire waypoints with wires whose two endpoints moved as one group."""
+        """Finalize or restore wire waypoints after a component drag."""
         try:
-            if not apply or not self._component_drag_start_positions:
+            if not self._component_drag_start_positions:
                 return
 
-            active_components = self._active_components()
-            deltas: Dict[str, Tuple[int, int]] = {}
-            for comp_id, (old_x, old_y) in self._component_drag_start_positions.items():
-                comp = active_components.get(comp_id)
-                if comp is None:
-                    continue
-                dx = int(comp.x - old_x)
-                dy = int(comp.y - old_y)
-                if dx or dy:
-                    deltas[comp_id] = (dx, dy)
-
-            if not deltas:
+            if not apply:
+                active_wires = self._active_wires()
+                for wire_id, snapshot in self._component_drag_wire_snapshot.items():
+                    wire = active_wires.get(wire_id)
+                    if wire is None:
+                        continue
+                    wire.waypoints = self._wire_point_tuples(snapshot["old_waypoints"])
+                self._refresh_wires()
                 return
 
-            for wire in self._active_wires().values():
-                if not wire.waypoints:
-                    continue
-                from_delta = deltas.get(wire.from_comp)
-                to_delta = deltas.get(wire.to_comp)
-                if from_delta is None or to_delta is None or from_delta != to_delta:
-                    continue
-                dx, dy = from_delta
-                wire.waypoints = [
-                    (float(x) + dx, float(y) + dy)
-                    for x, y in wire.waypoints
-                ]
+            self._refresh_wires()
         finally:
             self._component_drag_selected_ids = set()
             self._component_drag_start_positions = {}
+            self._component_drag_wire_snapshot = {}
 
     def _add_component_to_active_design(self, comp: ComponentInstance):
         subdef = self._active_subcircuit_def()
@@ -1297,7 +1463,7 @@ class CircuitCanvas(QGraphicsView):
             event.accept()
             return
 
-        if self.mode == CanvasMode.WIRE and self._wiring_start and self._temp_line:
+        if self.mode == CanvasMode.WIRE and self._is_drawing_wire() and self._temp_line:
             scene_pos = self.mapToScene(event.pos())
             self._update_temp_wire(scene_pos)
             event.accept()
@@ -1367,9 +1533,16 @@ class CircuitCanvas(QGraphicsView):
     def _handle_wire_left_click(self, scene_pos: QPointF):
         """PSCAD-style wire input: left click starts or adds a waypoint."""
         pin_info = self.get_pin_at(scene_pos)
-        if self._wiring_start is None:
+        if not self._is_drawing_wire():
             if pin_info:
                 self._start_wire_drag(pin_info, scene_pos)
+                return
+            wire_item = self.get_wire_at(scene_pos)
+            if wire_item:
+                start_pos = self.snap_to_grid(wire_item.nearest_point(scene_pos))
+                self._start_wire_input(start_pos, start_wire_id=wire_item.wire.wire_id)
+                return
+            self._start_wire_input(self.snap_to_grid(scene_pos))
             return
 
         if pin_info:
@@ -1387,7 +1560,7 @@ class CircuitCanvas(QGraphicsView):
 
     def _handle_wire_right_click(self, scene_pos: QPointF):
         """PSCAD-style wire input: right click finishes on a pin/wire or cancels."""
-        if self._wiring_start is None:
+        if not self._is_drawing_wire():
             return
 
         pin_info = self.get_pin_at(scene_pos)
@@ -1439,7 +1612,12 @@ class CircuitCanvas(QGraphicsView):
     def _clear_wire_input_state(self):
         self._remove_temp_wire_items()
         self._wiring_start = None
+        self._wire_start_pos = None
+        self._wire_start_wire_id = None
         self._wire_waypoints = []
+
+    def _is_drawing_wire(self) -> bool:
+        return self._wire_start_pos is not None
 
     def _update_temp_wire(self, end_pos: QPointF):
         if not self._temp_line:
@@ -1473,6 +1651,8 @@ class CircuitCanvas(QGraphicsView):
         return [self._point_tuple(point) for point in points]
 
     def _wire_start_scene_pos(self) -> Optional[QPointF]:
+        if self._wire_start_pos is not None:
+            return QPointF(self._wire_start_pos)
         if self._wiring_start is None:
             return None
         start_comp_id, start_pin = self._wiring_start
@@ -1638,92 +1818,185 @@ class CircuitCanvas(QGraphicsView):
         self.model._sync_counter_for_component(junction)
         return junction
 
-    def _complete_wire_to_new_junction(self, scene_pos: QPointF):
-        if self._wiring_start is None:
-            return
-
-        start_comp_id, start_pin = self._wiring_start
-        end_pos = self._resolve_wire_point(scene_pos, snap_to_wires=False)
-        path = self._wire_path_to(end_pos)
-        if len(path) < 2 or WireGraphicsItem._same_point(path[0], path[-1]):
-            self._cancel_wire_drag()
-            return
-        end_pos = path[-1]
-
-        self.model._save_undo_state()
-        active_components = self._active_components()
-        active_wires = self._active_wires()
-        junction = self._make_junction_at(end_pos)
-
+    def _new_wire(
+        self,
+        start_comp_id: str,
+        start_pin: str,
+        end_comp_id: str,
+        end_pin: str,
+        waypoints: Optional[List[tuple]] = None,
+    ) -> Wire:
         import uuid
-        wire = Wire(
+
+        return Wire(
             wire_id=f"W_{uuid.uuid4().hex[:8]}",
             from_comp=start_comp_id,
             from_pin=start_pin,
-            to_comp=junction.comp_id,
-            to_pin="node",
-            waypoints=self._wire_point_tuples(path[1:-1]),
+            to_comp=end_comp_id,
+            to_pin=end_pin,
+            waypoints=list(waypoints or []),
         )
 
-        active_components[junction.comp_id] = junction
-        active_wires[wire.wire_id] = wire
-        self._reset_wire_state()
-        self.model._notify("component_added")
-        if self.mode != CanvasMode.SELECT:
-            self._set_items_interactive(False)
-        self.wire_created.emit(start_comp_id, start_pin, junction.comp_id, "node")
+    def _has_duplicate_wire(
+        self,
+        start_comp_id: str,
+        start_pin: str,
+        end_comp_id: str,
+        end_pin: str,
+        active_wires: Dict[str, Wire],
+    ) -> bool:
+        for wire in active_wires.values():
+            same_direction = (
+                wire.from_comp == start_comp_id
+                and wire.from_pin == start_pin
+                and wire.to_comp == end_comp_id
+                and wire.to_pin == end_pin
+            )
+            reverse_direction = (
+                wire.from_comp == end_comp_id
+                and wire.from_pin == end_pin
+                and wire.to_comp == start_comp_id
+                and wire.to_pin == start_pin
+            )
+            if same_direction or reverse_direction:
+                return True
+        return False
 
-    def _complete_wire_to_existing_wire(self, wire_item: WireGraphicsItem, scene_pos: QPointF):
-        start_comp_id, start_pin = self._wiring_start
-        split_pos = self.snap_to_grid(wire_item.nearest_point(scene_pos))
-        path = self._wire_path_to(split_pos)
-        if len(path) < 2 or WireGraphicsItem._same_point(path[0], path[-1]):
-            return
+    def _split_wire_to_junction(
+        self,
+        wire_item: WireGraphicsItem,
+        split_pos: QPointF,
+        active_components: Dict[str, ComponentInstance],
+        active_wires: Dict[str, Wire],
+    ) -> Tuple[str, str]:
+        original = wire_item.wire
+        junction = self._make_junction_at(split_pos)
         first_waypoints, second_waypoints = self._split_wire_waypoints(wire_item, split_pos)
+
+        active_components[junction.comp_id] = junction
+        active_wires.pop(original.wire_id, None)
+        for wire in (
+            self._new_wire(
+                original.from_comp,
+                original.from_pin,
+                junction.comp_id,
+                "node",
+                first_waypoints,
+            ),
+            self._new_wire(
+                junction.comp_id,
+                "node",
+                original.to_comp,
+                original.to_pin,
+                second_waypoints,
+            ),
+        ):
+            active_wires[wire.wire_id] = wire
+        return junction.comp_id, "node"
+
+    def _start_anchor_for_commit(
+        self,
+        active_components: Dict[str, ComponentInstance],
+        active_wires: Dict[str, Wire],
+    ) -> Tuple[str, str]:
+        if self._wiring_start is not None:
+            return self._wiring_start
+
+        if self._wire_start_wire_id is not None:
+            wire_item = self.wire_items.get(self._wire_start_wire_id)
+            if wire_item is not None and self._wire_start_wire_id in active_wires:
+                return self._split_wire_to_junction(
+                    wire_item,
+                    self._wire_start_pos,
+                    active_components,
+                    active_wires,
+                )
+
+        junction = self._make_junction_at(self._wire_start_pos)
+        active_components[junction.comp_id] = junction
+        return junction.comp_id, "node"
+
+    def _target_anchor_for_commit(
+        self,
+        target_pos: QPointF,
+        active_components: Dict[str, ComponentInstance],
+        active_wires: Dict[str, Wire],
+        pin_info: Optional[Tuple['ComponentGraphicsItem', str]] = None,
+        wire_item: Optional[WireGraphicsItem] = None,
+    ) -> Tuple[str, str]:
+        if pin_info is not None:
+            comp_item, pin_name = pin_info
+            return comp_item.component.comp_id, pin_name
+
+        if wire_item is not None and wire_item.wire.wire_id in active_wires:
+            return self._split_wire_to_junction(
+                wire_item,
+                target_pos,
+                active_components,
+                active_wires,
+            )
+
+        junction = self._make_junction_at(target_pos)
+        active_components[junction.comp_id] = junction
+        return junction.comp_id, "node"
+
+    def _finish_wire_to_target(
+        self,
+        target_pos: QPointF,
+        pin_info: Optional[Tuple['ComponentGraphicsItem', str]] = None,
+        wire_item: Optional[WireGraphicsItem] = None,
+    ):
+        if not self._is_drawing_wire():
+            return
+
+        path = self._wire_path_to(target_pos)
+        if len(path) < 2 or WireGraphicsItem._same_point(path[0], path[-1]):
+            self._cancel_wire_drag()
+            return
 
         self.model._save_undo_state()
         active_components = self._active_components()
         active_wires = self._active_wires()
-        junction = self._make_junction_at(split_pos)
+        start_comp_id, start_pin = self._start_anchor_for_commit(active_components, active_wires)
+        end_comp_id, end_pin = self._target_anchor_for_commit(
+            path[-1],
+            active_components,
+            active_wires,
+            pin_info=pin_info,
+            wire_item=wire_item,
+        )
 
-        import uuid
-        original = wire_item.wire
-        new_wires = [
-            Wire(
-                wire_id=f"W_{uuid.uuid4().hex[:8]}",
-                from_comp=original.from_comp,
-                from_pin=original.from_pin,
-                to_comp=junction.comp_id,
-                to_pin="node",
-                waypoints=first_waypoints,
-            ),
-            Wire(
-                wire_id=f"W_{uuid.uuid4().hex[:8]}",
-                from_comp=junction.comp_id,
-                from_pin="node",
-                to_comp=original.to_comp,
-                to_pin=original.to_pin,
-                waypoints=second_waypoints,
-            ),
-            Wire(
-                wire_id=f"W_{uuid.uuid4().hex[:8]}",
-                from_comp=start_comp_id,
-                from_pin=start_pin,
-                to_comp=junction.comp_id,
-                to_pin="node",
-                waypoints=self._wire_point_tuples(path[1:-1]),
-            ),
-        ]
-
-        active_components[junction.comp_id] = junction
-        active_wires.pop(original.wire_id, None)
-        for wire in new_wires:
+        if start_comp_id != end_comp_id and not self._has_duplicate_wire(
+            start_comp_id,
+            start_pin,
+            end_comp_id,
+            end_pin,
+            active_wires,
+        ):
+            wire = self._new_wire(
+                start_comp_id,
+                start_pin,
+                end_comp_id,
+                end_pin,
+                self._wire_point_tuples(path[1:-1]),
+            )
             active_wires[wire.wire_id] = wire
+
         self._reset_wire_state()
         self.model._notify("component_added")
         if self.mode != CanvasMode.SELECT:
             self._set_items_interactive(False)
-        self.wire_created.emit(start_comp_id, start_pin, junction.comp_id, "node")
+        self.wire_created.emit(start_comp_id, start_pin, end_comp_id, end_pin)
+
+    def _complete_wire_to_new_junction(self, scene_pos: QPointF):
+        if not self._is_drawing_wire():
+            return
+        end_pos = self._resolve_wire_point(scene_pos, snap_to_wires=False)
+        self._finish_wire_to_target(end_pos)
+
+    def _complete_wire_to_existing_wire(self, wire_item: WireGraphicsItem, scene_pos: QPointF):
+        split_pos = self.snap_to_grid(wire_item.nearest_point(scene_pos))
+        self._finish_wire_to_target(split_pos, wire_item=wire_item)
 
     def _split_wire_waypoints(self, wire_item: WireGraphicsItem, split_pos: QPointF) -> Tuple[List[tuple], List[tuple]]:
         pts = wire_item._manhattan_points()
@@ -1761,14 +2034,27 @@ class CircuitCanvas(QGraphicsView):
     def _start_wire_drag(self, pin_info: Tuple['ComponentGraphicsItem', str], pos: QPointF):
         """开始拖拽式连线：在引脚上按下鼠标"""
         comp_item, pin_name = pin_info
+        pin_pos = comp_item.get_all_scene_pin_positions()[pin_name]
+        self._start_wire_input(
+            pin_pos,
+            start_pin=(comp_item.component.comp_id, pin_name),
+        )
+
+    def _start_wire_input(
+        self,
+        start_pos: QPointF,
+        start_pin: Optional[Tuple[str, str]] = None,
+        start_wire_id: Optional[str] = None,
+    ):
         self._clear_wire_input_state()
-        self._wiring_start = (comp_item.component.comp_id, pin_name)
+        self._wiring_start = start_pin
+        self._wire_start_pos = QPointF(start_pos)
+        self._wire_start_wire_id = start_wire_id
         self._wire_waypoints = []
 
-        pin_pos = comp_item.get_all_scene_pin_positions()[pin_name]
         self._temp_line = WireGraphicsItem(
             Wire(wire_id="temp", from_comp="", from_pin="", to_comp="", to_pin=""),
-            pin_pos, pos
+            self._wire_start_pos, self._wire_start_pos
         )
         self._temp_line.pen = QPen(
             WireGraphicsItem.WIRE_COLOR,
@@ -1776,50 +2062,14 @@ class CircuitCanvas(QGraphicsView):
             Qt.PenStyle.DashLine,
         )
         self.scene.addItem(self._temp_line)
-        self._update_temp_wire(pos)
+        self._update_temp_wire(self._wire_start_pos)
         self.setCursor(Qt.CrossCursor)
 
     def _complete_wire_drag(self, pin_info: Tuple['ComponentGraphicsItem', str]):
-        """完成拖拽式连线：在引脚上释放鼠标"""
+        """Finish a click-style wire on a component pin."""
         comp_item, pin_name = pin_info
-        start_comp_id, start_pin = self._wiring_start
-        end_comp_id, end_pin = comp_item.component.comp_id, pin_name
         end_pos = comp_item.get_all_scene_pin_positions()[pin_name]
-        path = self._wire_path_to(end_pos)
-        if len(path) < 2 or WireGraphicsItem._same_point(path[0], path[-1]):
-            return
-        waypoints = self._wire_point_tuples(path[1:-1])
-
-        # 清除临时线
-        self._clear_wire_input_state()
-        self.setCursor(Qt.CrossCursor)
-
-        if start_comp_id == end_comp_id:
-            # 自己连自己 → 取消
-            return
-
-        # 检查是否已有相同连线
-        for w in self._active_wires().values():
-            if (w.from_comp == start_comp_id and w.from_pin == start_pin
-                    and w.to_comp == end_comp_id and w.to_pin == end_pin):
-                return
-            if (w.from_comp == end_comp_id and w.from_pin == end_pin
-                    and w.to_comp == start_comp_id and w.to_pin == start_pin):
-                return
-
-        import uuid
-        wire = Wire(
-            wire_id=f"W_{uuid.uuid4().hex[:8]}",
-            from_comp=start_comp_id,
-            from_pin=start_pin,
-            to_comp=end_comp_id,
-            to_pin=end_pin,
-            waypoints=waypoints,
-        )
-        self._add_wire_to_active_design(wire)
-        if self.mode != CanvasMode.SELECT:
-            self._set_items_interactive(False)
-        self.wire_created.emit(start_comp_id, start_pin, end_comp_id, end_pin)
+        self._finish_wire_to_target(end_pos, pin_info=pin_info)
 
     def _cancel_wire_drag(self):
         """取消拖拽式连线：在空白处释放鼠标"""
@@ -2101,36 +2351,111 @@ class CircuitCanvas(QGraphicsView):
                 self.model.rotate_component(item.component.comp_id, 90)
 
     def _copy_selected(self):
-        """复制选中的元件到剪贴板"""
+        """复制选中的元件（及它们之间的连线）到剪贴板"""
         selected = []
         for comp_id, item in self.component_items.items():
             if item.isSelected():
                 selected.append(comp_id)
-        if selected:
-            self._clipboard = {
-                cid: copy.deepcopy(self.model.components[cid])
-                for cid in selected
-                if cid in self.model.components
-            }
+        if not selected:
+            return
+
+        # Bug1 修复：使用 _active_components() 而非 self.model.components
+        active_comps = self._active_components()
+        active_wrs = self._active_wires()
+
+        clipboard_comps = {}
+        for cid in selected:
+            if cid in active_comps:
+                clipboard_comps[cid] = copy.deepcopy(active_comps[cid])
+
+        if not clipboard_comps:
+            return
+
+        # Bug3 修复：同时复制选中元件之间的内部连线
+        selected_set = set(clipboard_comps.keys())
+        clipboard_wires = {}
+        for wid, wire in active_wrs.items():
+            if wire.from_comp in selected_set and wire.to_comp in selected_set:
+                clipboard_wires[wid] = copy.deepcopy(wire)
+
+        self._clipboard = {
+            'components': clipboard_comps,
+            'wires': clipboard_wires,
+        }
 
     def _paste_clipboard(self, pos: QPointF):
-        """从剪贴板粘贴元件"""
+        """从剪贴板粘贴元件（及连线）"""
         if not self._clipboard:
             return
+
+        clipboard_comps = self._clipboard.get('components', {})
+        clipboard_wires = self._clipboard.get('wires', {})
+        if not clipboard_comps:
+            return
+
         pos = self.snap_to_grid(pos)
-        for comp in self._clipboard.values():
+
+        # Bug5 修复：保留元件之间的相对位置
+        # 计算原始选区的包围盒中心
+        orig_xs = [c.x for c in clipboard_comps.values()]
+        orig_ys = [c.y for c in clipboard_comps.values()]
+        center_x = sum(orig_xs) / len(orig_xs)
+        center_y = sum(orig_ys) / len(orig_ys)
+
+        # Bug7 修复：使用 _active_components() 计算名称
+        active_comps = self._active_components()
+
+        # 建立 old_comp_id → new_comp_id 映射，用于重映射连线
+        id_remap: Dict[str, str] = {}
+
+        for old_cid, comp in clipboard_comps.items():
+            new_id = self.model.generate_component_id(comp.comp_type)
+            id_remap[old_cid] = new_id
+
+            # 名称根据当前活动容器计算（含已粘贴的新元件）
+            count = len([c for c in active_comps.values()
+                         if c.comp_type == comp.comp_type]) + 1
+            new_name = f"{comp.comp_type.value}{count}"
+
+            # Bug5：相对于原中心的偏移 + 粘贴点
+            rel_x = comp.x - center_x
+            rel_y = comp.y - center_y
+
+            # Bug6 修复：使用 copy.deepcopy 处理嵌套 params
+            new_pins = []
+            for p in comp.pins:
+                new_pin = copy.deepcopy(p)
+                # Bug4 修复：清除残留的 node_id
+                new_pin.node_id = None
+                new_pins.append(new_pin)
+
             new_comp = ComponentInstance(
-                comp_id=self.model.generate_component_id(comp.comp_type),
+                comp_id=new_id,
                 comp_type=comp.comp_type,
-                name=f"{comp.comp_type.value}{len([c for c in self.model.components.values() if c.comp_type == comp.comp_type]) + 1}",
-                x=int(pos.x()),
-                y=int(pos.y()),
+                name=new_name,
+                x=int(pos.x() + rel_x),
+                y=int(pos.y() + rel_y),
                 rotation=comp.rotation,
-                params=comp.params.copy(),
-                pins=[copy.deepcopy(p) for p in comp.pins],
+                params=copy.deepcopy(comp.params),
+                pins=new_pins,
             )
-            self.model.add_component(new_comp)
-            pos = QPointF(pos.x() + 40, pos.y() + 40)  # 偏移避免重叠
+            # Bug2 修复：使用 _add_component_to_active_design 而非 model.add_component
+            self._add_component_to_active_design(new_comp)
+
+        # Bug3 修复：复制连线，重映射端点 comp_id
+        for old_wid, wire in clipboard_wires.items():
+            new_from = id_remap.get(wire.from_comp)
+            new_to = id_remap.get(wire.to_comp)
+            if new_from and new_to:
+                new_wire = Wire(
+                    wire_id=f"W_{uuid.uuid4().hex[:8]}",
+                    from_comp=new_from,
+                    from_pin=wire.from_pin,
+                    to_comp=new_to,
+                    to_pin=wire.to_pin,
+                    waypoints=copy.deepcopy(wire.waypoints),
+                )
+                self._add_wire_to_active_design(new_wire)
 
     def _on_model_changed(self, event: str = "changed"):
         """模型变化时重绘"""

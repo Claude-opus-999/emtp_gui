@@ -3,7 +3,7 @@
   "version": "3.0",
   "settings": {
     "dt": 1e-08,
-    "finish_time": 0.0001,
+    "finish_time": 0.001,
     "verbose": false,
     "result_mode": "probes_only",
     "ulm_batch_mode": "auto",
@@ -11,6 +11,7 @@
     "record_branch_history": false,
     "record_line_history": false,
     "record_source_history": false,
+    "auto_voltage_probes": false,
     "allow_dense_fallback": true,
     "dense_fallback_max_size": 300,
     "lightning_type": "8/20",
@@ -175,17 +176,89 @@
           "node_id": 1
         }
       ]
+    },
+    "PRB_001": {
+      "comp_id": "PRB_001",
+      "comp_type": "PRB",
+      "name": "PRB1",
+      "x": -70,
+      "y": -10,
+      "rotation": 0,
+      "params": {
+        "probe_type": "voltage_ground",
+        "unit": "kV",
+        "line_name": "",
+        "line_end": "m",
+        "line_phase": 0
+      },
+      "pins": [
+        {
+          "name": "sense",
+          "local_x": 0,
+          "local_y": -15,
+          "node_id": 2
+        }
+      ]
+    },
+    "PRB_002": {
+      "comp_id": "PRB_002",
+      "comp_type": "PRB",
+      "name": "PRB2",
+      "x": -280,
+      "y": -15,
+      "rotation": 0,
+      "params": {
+        "probe_type": "voltage_ground",
+        "unit": "kV",
+        "line_name": "",
+        "line_end": "m",
+        "line_phase": 0
+      },
+      "pins": [
+        {
+          "name": "sense",
+          "local_x": 0,
+          "local_y": -15,
+          "node_id": 1
+        }
+      ]
+    },
+    "JUNC_001": {
+      "comp_id": "JUNC_001",
+      "comp_type": "JUNC",
+      "name": "JUNC1",
+      "x": -280,
+      "y": -160,
+      "rotation": 0,
+      "params": {},
+      "pins": [
+        {
+          "name": "node",
+          "local_x": 0,
+          "local_y": 0,
+          "node_id": 1
+        }
+      ]
+    },
+    "JUNC_002": {
+      "comp_id": "JUNC_002",
+      "comp_type": "JUNC",
+      "name": "JUNC2",
+      "x": -85,
+      "y": -160,
+      "rotation": 0,
+      "params": {},
+      "pins": [
+        {
+          "name": "node",
+          "local_x": 0,
+          "local_y": 0,
+          "node_id": 2
+        }
+      ]
     }
   },
   "wires": {
-    "W_85f5347d": {
-      "wire_id": "W_85f5347d",
-      "from_comp": "C_001",
-      "from_pin": "nt",
-      "to_comp": "R_001",
-      "to_pin": "nf",
-      "waypoints": []
-    },
     "W_41fd1db5": {
       "wire_id": "W_41fd1db5",
       "from_comp": "L_001",
@@ -218,14 +291,60 @@
       "to_pin": "nf",
       "waypoints": []
     },
-    "W_559c4629": {
-      "wire_id": "W_559c4629",
+    "W_111324d9": {
+      "wire_id": "W_111324d9",
       "from_comp": "IS_002",
       "from_pin": "nt",
+      "to_comp": "JUNC_001",
+      "to_pin": "node",
+      "waypoints": []
+    },
+    "W_f8bcfd5d": {
+      "wire_id": "W_f8bcfd5d",
+      "from_comp": "JUNC_001",
+      "from_pin": "node",
       "to_comp": "C_001",
       "to_pin": "nf",
       "waypoints": []
+    },
+    "W_9b91a96a": {
+      "wire_id": "W_9b91a96a",
+      "from_comp": "PRB_002",
+      "from_pin": "sense",
+      "to_comp": "JUNC_001",
+      "to_pin": "node",
+      "waypoints": []
+    },
+    "W_2cbeaaf1": {
+      "wire_id": "W_2cbeaaf1",
+      "from_comp": "C_001",
+      "from_pin": "nt",
+      "to_comp": "JUNC_002",
+      "to_pin": "node",
+      "waypoints": []
+    },
+    "W_be460ddb": {
+      "wire_id": "W_be460ddb",
+      "from_comp": "JUNC_002",
+      "from_pin": "node",
+      "to_comp": "R_001",
+      "to_pin": "nf",
+      "waypoints": []
+    },
+    "W_8c5668f8": {
+      "wire_id": "W_8c5668f8",
+      "from_comp": "PRB_001",
+      "from_pin": "sense",
+      "to_comp": "JUNC_002",
+      "to_pin": "node",
+      "waypoints": [
+        [
+          -85.0,
+          -25.0
+        ]
+      ]
     }
   },
-  "probes": []
+  "probes": [],
+  "subcircuit_defs": {}
 }

@@ -204,6 +204,7 @@ class RegressionTests(unittest.TestCase):
                 self.log_received = FakeSignal()
                 self.results_ready = FakeSignal()
                 self.finished_ok = FakeSignal()
+                self.finished = FakeSignal()
                 self.error = FakeSignal()
                 self.started = False
                 FakeRunner.instances.append(self)
@@ -605,6 +606,21 @@ class RegressionTests(unittest.TestCase):
         self.assertLess(WireGraphicsItem.ENDPOINT_DOT_DIAMETER, 4.0)
         self.assertGreater(WireGraphicsItem.ENDPOINT_DOT_DIAMETER, item.pen.widthF())
         self.assertLessEqual(item.selected_pen.widthF(), 2.5)
+        for first, second in zip(points, points[1:]):
+            self.assertTrue(
+                abs(first.x() - second.x()) < 0.1
+                or abs(first.y() - second.y()) < 0.1
+            )
+
+    def test_wire_graphics_item_repairs_diagonal_wire_without_waypoints(self):
+        wire = Wire("W_DIAG", "R_001", "nt", "C_001", "nf")
+        item = WireGraphicsItem(wire, QPointF(0, 0), QPointF(100, 50))
+
+        points = item._manhattan_points()
+
+        self.assertGreater(len(points), 2)
+        self.assertEqual(points[0], QPointF(0, 0))
+        self.assertEqual(points[-1], QPointF(100, 50))
         for first, second in zip(points, points[1:]):
             self.assertTrue(
                 abs(first.x() - second.x()) < 0.1
@@ -1066,6 +1082,137 @@ class RegressionTests(unittest.TestCase):
             canvas.close()
             app.processEvents()
 
+    def test_component_drag_reroutes_wire_without_waypoints_orthogonally(self):
+        app = get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            r1 = ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=-100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            r2 = ComponentInstance(
+                comp_id="R_002",
+                comp_type=ComponentType.RESISTOR,
+                name="R2",
+                x=100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            model.add_component(r1)
+            model.add_component(r2)
+            model.add_wire(Wire("W_ROUTE", "R_001", "nt", "R_002", "nf"))
+
+            moving_item = canvas.component_items["R_001"]
+            moving_item.setSelected(True)
+            moving_item._drag_snapshot = model._snapshot()
+            canvas._begin_component_drag()
+            moving_item.setPos(QPointF(-100, 40))
+            app.processEvents()
+
+            wire = model.wires["W_ROUTE"]
+            start_pos, end_pos = canvas._wire_endpoint_positions(wire)
+            self.assertEqual(wire.waypoints, [(end_pos.x(), start_pos.y())])
+            points = [start_pos, *[QPointF(x, y) for x, y in wire.waypoints], end_pos]
+            for first, second in zip(points, points[1:]):
+                self.assertTrue(
+                    abs(first.x() - second.x()) < 0.1
+                    or abs(first.y() - second.y()) < 0.1
+                )
+        finally:
+            canvas.close()
+
+    def test_component_drag_preserves_existing_route_by_adjusting_moved_endpoint_waypoint(self):
+        app = get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            r1 = ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=-100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            r2 = ComponentInstance(
+                comp_id="R_002",
+                comp_type=ComponentType.RESISTOR,
+                name="R2",
+                x=100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            model.add_component(r1)
+            model.add_component(r2)
+            model.add_wire(
+                Wire(
+                    "W_ROUTE",
+                    "R_001",
+                    "nt",
+                    "R_002",
+                    "nf",
+                    [(-20.0, 0.0), (-20.0, -40.0), (70.0, -40.0)],
+                )
+            )
+
+            moving_item = canvas.component_items["R_001"]
+            moving_item.setSelected(True)
+            moving_item._drag_snapshot = model._snapshot()
+            canvas._begin_component_drag()
+            moving_item.setPos(QPointF(-100, 40))
+            app.processEvents()
+
+            self.assertEqual(
+                model.wires["W_ROUTE"].waypoints,
+                [(-20.0, 40.0), (-20.0, -40.0), (70.0, -40.0)],
+            )
+        finally:
+            canvas.close()
+
+    def test_component_group_drag_moves_wire_waypoints_realtime_with_endpoints(self):
+        app = get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            r1 = ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=-100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            r2 = ComponentInstance(
+                comp_id="R_002",
+                comp_type=ComponentType.RESISTOR,
+                name="R2",
+                x=100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            model.add_component(r1)
+            model.add_component(r2)
+            model.add_wire(Wire("W_ROUTE", "R_001", "nt", "R_002", "nf", [(-70.0, -40.0), (70.0, -40.0)]))
+
+            first_item = canvas.component_items["R_001"]
+            second_item = canvas.component_items["R_002"]
+            first_item.setSelected(True)
+            second_item.setSelected(True)
+            first_item._drag_snapshot = model._snapshot()
+            canvas._begin_component_drag()
+            first_item.setPos(QPointF(-80, 10))
+            second_item.setPos(QPointF(120, 10))
+            app.processEvents()
+
+            self.assertEqual(model.wires["W_ROUTE"].waypoints, [(-50.0, -30.0), (90.0, -30.0)])
+        finally:
+            canvas.close()
+
     def test_pscad_wire_mode_can_finish_on_existing_wire_midpoint(self):
         get_app()
         model = CircuitModel()
@@ -1112,6 +1259,123 @@ class RegressionTests(unittest.TestCase):
                 if comp.comp_type == junction_type
             ]
             self.assertEqual(len(junctions), 1)
+            self.assertNotIn("W_MAIN", model.wires)
+            self.assertEqual(len(model.wires), 3)
+            self.assertGreaterEqual(
+                len([
+                    wire for wire in model.wires.values()
+                    if wire.from_comp == junctions[0].comp_id or wire.to_comp == junctions[0].comp_id
+                ]),
+                3,
+            )
+        finally:
+            canvas.close()
+
+    def test_wire_mode_can_start_on_empty_grid_and_commit_between_junctions(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            canvas.set_mode(CanvasMode.WIRE)
+
+            canvas._handle_wire_left_click(QPointF(11, 11))
+
+            self.assertIsNotNone(canvas._temp_line)
+            self.assertEqual(canvas._temp_line.start_pos, QPointF(10, 10))
+            self.assertEqual(len(model.components), 0)
+            self.assertEqual(len(model.wires), 0)
+
+            canvas._handle_wire_right_click(QPointF(43, 11))
+
+            junctions = [
+                comp for comp in model.components.values()
+                if comp.comp_type == ComponentType.JUNCTION
+            ]
+            self.assertEqual(len(junctions), 2)
+            self.assertEqual({(comp.x, comp.y) for comp in junctions}, {(10, 10), (45, 10)})
+            self.assertEqual(len(model.wires), 1)
+            wire = next(iter(model.wires.values()))
+            self.assertEqual({wire.from_comp, wire.to_comp}, {junctions[0].comp_id, junctions[1].comp_id})
+            self.assertEqual(wire.from_pin, "node")
+            self.assertEqual(wire.to_pin, "node")
+            self.assertEqual(wire.waypoints, [])
+            self.assertIsNone(canvas._temp_line)
+            self.assertEqual(canvas.mode, CanvasMode.WIRE)
+        finally:
+            canvas.close()
+
+    def test_exiting_wire_mode_after_grid_start_discards_temporary_wire(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            canvas.set_mode(CanvasMode.WIRE)
+
+            canvas._handle_wire_left_click(QPointF(11, 11))
+            canvas._update_temp_wire(QPointF(43, 24))
+            canvas.set_mode(CanvasMode.SELECT)
+
+            self.assertIsNone(canvas._wiring_start)
+            self.assertIsNone(canvas._temp_line)
+            self.assertIsNone(canvas._temp_wire_node)
+            self.assertEqual(len(model.components), 0)
+            self.assertEqual(len(model.wires), 0)
+        finally:
+            canvas.close()
+
+    def test_wire_mode_can_start_on_existing_wire_midpoint_without_splitting_until_commit(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            r1 = ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=-100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            r2 = ComponentInstance(
+                comp_id="R_002",
+                comp_type=ComponentType.RESISTOR,
+                name="R2",
+                x=100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            r3 = ComponentInstance(
+                comp_id="R_003",
+                comp_type=ComponentType.RESISTOR,
+                name="R3",
+                x=0,
+                y=100,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            for comp in (r1, r2, r3):
+                model.add_component(comp)
+            model.add_wire(Wire("W_MAIN", "R_001", "nt", "R_002", "nf"))
+            canvas.set_mode(CanvasMode.WIRE)
+
+            midpoint = QPointF(0, 0)
+            end = canvas.component_items["R_003"].get_all_scene_pin_positions()["nf"]
+            canvas._handle_wire_left_click(midpoint)
+
+            self.assertIsNotNone(canvas._temp_line)
+            self.assertIn("W_MAIN", model.wires)
+            self.assertEqual(
+                len([comp for comp in model.components.values() if comp.comp_type == ComponentType.JUNCTION]),
+                0,
+            )
+
+            canvas._handle_wire_right_click(end)
+
+            junctions = [
+                comp for comp in model.components.values()
+                if comp.comp_type == ComponentType.JUNCTION
+            ]
+            self.assertEqual(len(junctions), 1)
+            self.assertEqual((junctions[0].x, junctions[0].y), (0, 0))
             self.assertNotIn("W_MAIN", model.wires)
             self.assertEqual(len(model.wires), 3)
             self.assertGreaterEqual(

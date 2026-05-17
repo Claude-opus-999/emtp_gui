@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QTabWidget, QComboBox, QSpinBox, QDoubleSpinBox,
     QGroupBox, QFormLayout, QLineEdit, QPlainTextEdit,
     QCheckBox, QTextEdit, QSplitter, QSizePolicy,
-    QProgressDialog, QScrollArea,
+    QProgressBar, QScrollArea,
 )
 from PySide6.QtCore import Qt, QSize, QPointF, Signal, QRegularExpression
 from PySide6.QtGui import (
@@ -1866,6 +1866,12 @@ class MainWindow(QMainWindow):
         self.run_action.triggered.connect(self._on_run_simulation)
         sim_menu.addAction(self.run_action)
 
+        self.stop_action = QAction("停止仿真", self)
+        self.stop_action.setShortcut("Shift+F5")
+        self.stop_action.setEnabled(False)
+        self.stop_action.triggered.connect(self._on_sim_cancel)
+        sim_menu.addAction(self.stop_action)
+
         settings_action = QAction("仿真设置", self)
         settings_action.triggered.connect(self._on_sim_settings)
         sim_menu.addAction(settings_action)
@@ -1903,6 +1909,21 @@ class MainWindow(QMainWindow):
         """)
         self.run_btn.clicked.connect(self._on_run_simulation)
         toolbar.addWidget(self.run_btn)
+
+        # 停止仿真按钮（与运行按钮互斥）
+        self.stop_btn = QPushButton("■ 停止")
+        self.stop_btn.setToolTip("停止仿真 (Shift+F5)")
+        self.stop_btn.setEnabled(False)
+        self.stop_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #dc2626; color: white; border: none;
+                border-radius: 4px; padding: 6px 14px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #b91c1c; }
+            QPushButton:disabled { background-color: #94a3b8; }
+        """)
+        self.stop_btn.clicked.connect(self._on_sim_cancel)
+        toolbar.addWidget(self.stop_btn)
 
         toolbar.addSeparator()
 
@@ -2002,7 +2023,34 @@ class MainWindow(QMainWindow):
     def _setup_status_bar(self):
         self.status_label = QLabel("就绪")
         self.status_label.setStyleSheet("padding: 2px 8px;")
-        self.statusBar().addPermanentWidget(self.status_label)
+        self.statusBar().addWidget(self.status_label, 1)
+
+        # 仿真状态区域（进度条 + 状态文字），默认隐藏
+        self._sim_status_label = QLabel("")
+        self._sim_status_label.setStyleSheet(
+            "padding: 2px 8px; color: #0369a1; font-weight: bold;"
+        )
+        self._sim_status_label.hide()
+        self.statusBar().addPermanentWidget(self._sim_status_label)
+
+        self._sim_progress_bar = QProgressBar()
+        self._sim_progress_bar.setRange(0, 100)
+        self._sim_progress_bar.setValue(0)
+        self._sim_progress_bar.setFixedWidth(200)
+        self._sim_progress_bar.setFixedHeight(16)
+        self._sim_progress_bar.setTextVisible(True)
+        self._sim_progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #cbd5e1; border-radius: 4px;
+                background-color: #f1f5f9; text-align: center;
+                font-size: 11px; color: #334155;
+            }
+            QProgressBar::chunk {
+                background-color: #059669; border-radius: 3px;
+            }
+        """)
+        self._sim_progress_bar.hide()
+        self.statusBar().addPermanentWidget(self._sim_progress_bar)
 
     # ================================================================
     #  模型观察者回调
@@ -2159,7 +2207,7 @@ class MainWindow(QMainWindow):
             self.canvas._placing_type = None
             self.wire_btn.setChecked(True)
             self.select_btn.setChecked(False)
-            self.status_label.setText("连线模式: 从引脚拖拽到引脚 (按Esc退出)")
+            self.status_label.setText("连线模式: 左键确定连线点，右键结束当前连线 (按Esc退出)")
 
     def _on_add_ground(self):
         """添加接地（到画布中心）"""
@@ -2204,14 +2252,28 @@ class MainWindow(QMainWindow):
     # ================================================================
 
     def _set_running_ui(self, running: bool):
-        """统一切换仿真运行期间的按钮状态。"""
-        enabled = not running
+        """统一切换仿真运行期间的按钮状态（运行/停止互斥）。"""
+        # 运行按钮 ↔ 停止按钮 互斥
         if hasattr(self, "run_action"):
-            self.run_action.setEnabled(enabled)
+            self.run_action.setEnabled(not running)
         if hasattr(self, "run_btn"):
-            self.run_btn.setEnabled(enabled)
-        if hasattr(self, "status_label"):
-            self.status_label.setText("正在运行仿真..." if running else "就绪")
+            self.run_btn.setEnabled(not running)
+        if hasattr(self, "stop_action"):
+            self.stop_action.setEnabled(running)
+        if hasattr(self, "stop_btn"):
+            self.stop_btn.setEnabled(running)
+
+        # 状态栏进度条 显示/隐藏
+        if hasattr(self, "_sim_progress_bar"):
+            if running:
+                self._sim_progress_bar.setValue(0)
+                self._sim_progress_bar.show()
+                self._sim_status_label.setText("仿真运行中…")
+                self._sim_status_label.show()
+            else:
+                self._sim_progress_bar.setRange(0, 100)  # 从脉冲模式恢复
+                self._sim_progress_bar.hide()
+                self._sim_status_label.hide()
 
     def _on_validate(self):
         """验证电路 - 检查常见错误"""
@@ -2253,7 +2315,10 @@ class MainWindow(QMainWindow):
             self.console_panel.append_text(line)
 
     def _on_run_simulation(self):
-        """使用 SolverBuilder 直接构建并在后台线程执行仿真"""
+        """使用 SolverBuilder 直接构建并在后台线程执行仿真。
+        仿真在独立线程运行，使用模型的序列化副本，
+        因此仿真期间可以继续编辑电路而不会互相影响。
+        """
         self.console_panel.clear()
         self.console_panel.append_text(">>> 正在构建电路...")
 
@@ -2261,58 +2326,76 @@ class MainWindow(QMainWindow):
         code = generate_code(self.model)
         self.code_preview.setPlainText(code)
 
-        # 创建进度对话框
-        self._progress_dialog = QProgressDialog("正在运行仿真...", "取消", 0, 100, self)
-        self._progress_dialog.setWindowTitle("仿真进度")
-        self._progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        self._progress_dialog.setMinimumDuration(500)  # 500ms 后才显示
-        self._progress_dialog.setAutoClose(False)
-        self._progress_dialog.setAutoReset(False)
-        self._progress_dialog.canceled.connect(self._on_sim_cancel)
+        # 创建仿真线程（内部通过 to_dict/from_dict 序列化模型副本，
+        # 与当前 GUI model 完全独立，仿真期间可以自由编辑电路）
+        try:
+            self._sim_runner = SimulationRunner(self.model, parent=self)
+        except Exception as e:
+            import traceback
+            error_msg = f"创建仿真线程失败:\n{type(e).__name__}: {e}\n\n{traceback.format_exc()}"
+            self.console_panel.append_text(f">>> {error_msg}")
+            self.status_label.setText("仿真启动失败")
+            return
 
-        # 使用 SolverBuilder 直接构建（不再用 exec）
-        self._sim_runner = SimulationRunner(self.model, parent=self)
         self._sim_runner.progress.connect(self._on_sim_progress)
         self._sim_runner.progress_pct.connect(self._on_sim_progress_pct)
         self._sim_runner.log_received.connect(self._on_sim_log)
         self._sim_runner.results_ready.connect(self._on_sim_results)
         self._sim_runner.finished_ok.connect(self._on_sim_finished)
         self._sim_runner.error.connect(self._on_sim_error)
-        self._set_running_ui(True)
+        # QThread.finished 在 run() 以任何方式返回后都会触发（完成/出错/取消），
+        # 用它做兜底清理，确保 UI 一定能恢复到就绪状态。
+        self._sim_runner.finished.connect(self._on_sim_thread_finished)
 
+        self._set_running_ui(True)
+        self.status_label.setText("仿真运行中")
         self._sim_runner.start()
 
     def _on_sim_cancel(self):
-        """用户点击取消仿真"""
-        if hasattr(self, '_sim_runner') and self._sim_runner.isRunning():
+        """用户点击停止仿真"""
+        if hasattr(self, '_sim_runner') and self._sim_runner and self._sim_runner.isRunning():
             self._sim_runner.request_cancel()
-            self.console_panel.append_text(">>> 正在取消仿真...")
-            self.status_label.setText("正在取消仿真...")
+            self.console_panel.append_text(">>> 正在停止仿真...")
+            self._sim_status_label.setText("正在停止…")
+            # 禁用停止按钮防止重复点击
+            if hasattr(self, "stop_btn"):
+                self.stop_btn.setEnabled(False)
+            if hasattr(self, "stop_action"):
+                self.stop_action.setEnabled(False)
 
     def _on_sim_progress(self, msg: str):
-        """仿真进度回调（在主线程中调用）"""
+        """仿真进度文字回调"""
         if msg:
             self.console_panel.append_text(msg)
 
     def _on_sim_progress_pct(self, pct: int):
-        """仿真进度百分比回调"""
-        if hasattr(self, '_progress_dialog') and self._progress_dialog:
-            self._progress_dialog.setValue(pct)
+        """仿真进度百分比回调 - 更新状态栏进度条。
+        pct == -1 → 切换到不确定脉冲模式（内核不支持 step_callback 时）
+        pct 0~100 → 正常百分比模式
+        """
+        if not hasattr(self, '_sim_progress_bar'):
+            return
+        bar = self._sim_progress_bar
+        if pct < 0:
+            # 不确定模式：进度条左右脉冲滚动
+            if bar.maximum() != 0:
+                bar.setRange(0, 0)
+            self._sim_status_label.setText("仿真运行中…")
+        else:
+            # 确定模式：恢复 0~100 范围
+            if bar.maximum() == 0:
+                bar.setRange(0, 100)
+            bar.setValue(pct)
+            self._sim_status_label.setText(f"仿真运行中… {pct}%")
 
     def _on_sim_finished(self, solver):
-        """仿真完成回调（在主线程中调用）"""
-        # 关闭进度对话框
-        if hasattr(self, '_progress_dialog') and self._progress_dialog:
-            self._progress_dialog.close()
-            self._progress_dialog = None
-
+        """仿真完成回调"""
         self._set_running_ui(False)
 
         try:
             self.plot_panel.display_results(solver)
-            self.status_label.setText("仿真完成")
+            self.status_label.setText("✅ 仿真完成")
             self.console_panel.append_text(">>> 仿真完成！")
-            QMessageBox.information(self, "仿真完成", "仿真已成功完成！")
         except Exception as e:
             import traceback
             error_msg = f"显示结果出错:\n{str(e)}\n\n{traceback.format_exc()}"
@@ -2320,30 +2403,37 @@ class MainWindow(QMainWindow):
             self.status_label.setText("结果显示出错")
 
     def _on_sim_error(self, error_msg: str):
-        """仿真错误回调（在主线程中调用）"""
-        # 关闭进度对话框
-        if hasattr(self, '_progress_dialog') and self._progress_dialog:
-            self._progress_dialog.close()
-            self._progress_dialog = None
-
+        """仿真错误回调"""
         self._set_running_ui(False)
 
         self.console_panel.append_text(f">>> 仿真出错:\n{error_msg}")
-        QMessageBox.critical(self, "仿真错误", f"仿真出错:\n{error_msg[:200]}...")
-        self.status_label.setText("仿真出错")
+        self.status_label.setText("❌ 仿真出错（详见控制台）")
 
     def _on_sim_log(self, msg: str):
-        """浠跨湡鏃ュ織鍥炶皟锛堝湪涓荤嚎绋嬩腑璋冪敤锛?"""
+        """仿真日志回调"""
         if msg:
             self.console_panel.append_text(msg)
 
     def _on_sim_results(self, results: dict):
-        """缂撳瓨浠跨湡搴忓垪鍖栫粨鏋滐紝渚涘鍑烘垨鍚庣画鏌ョ湅銆?"""
+        """缓存仿真序列化结果"""
         self._last_sim_results = results
         n_probes = len(results.get("probes", {}))
         self.console_panel.append_text(f">>> received serialized data for {n_probes} probes")
         if results.get("timing"):
             self.console_panel.append_text(">>> timing stats cached")
+
+    def _on_sim_thread_finished(self):
+        """QThread.finished 兜底回调 — run() 以任何方式返回后都会触发。
+        保证 UI 一定能从"运行中"恢复到就绪状态（包括用户取消的情况）。
+        """
+        # 如果 _on_sim_finished 或 _on_sim_error 已经调用过 _set_running_ui(False)，
+        # 按钮已经恢复，这里再调一次也是幂等的，不会有副作用。
+        self._set_running_ui(False)
+
+        # 如果是取消导致的结束，更新状态栏文字
+        runner = getattr(self, '_sim_runner', None)
+        if runner and getattr(runner, '_cancel_requested', False):
+            self.status_label.setText("仿真已取消")
 
     def _on_sim_settings(self):
         """聚焦到仿真配置面板"""
