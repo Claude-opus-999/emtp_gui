@@ -332,7 +332,8 @@ class SolverBuilder:
             for port in subdef.ports:
                 mapped = pin_map.get((port.internal_comp_id, port.internal_pin_name))
                 if mapped is not None:
-                    port_map[port.port_name] = mapped
+                    port_map[port.port_id] = mapped
+                    port_map.setdefault(port.port_name, mapped)
             return port_map
 
         top_pin_map = {}

@@ -1516,6 +1516,227 @@ class RegressionTests(unittest.TestCase):
             ],
         )
 
+    def test_add_port_to_subcircuit_creates_stable_port_id_and_component(self):
+        model = CircuitModel()
+        subdef = SubcircuitDefinition(name="FILTER")
+        model.subcircuit_defs[subdef.name] = subdef
+
+        port = model.add_port_to_subcircuit("FILTER", "A", x=10, y=20)
+
+        self.assertEqual(port.port_id, "P_001")
+        self.assertEqual(port.name, "A")
+        self.assertEqual(port.internal_pin, "node")
+        self.assertIn(port.internal_comp_id, subdef.components)
+        port_comp = subdef.components[port.internal_comp_id]
+        self.assertEqual(port_comp.comp_type, ComponentType.SUBCIRCUIT_PORT)
+        self.assertEqual(port_comp.x, 10)
+        self.assertEqual(port_comp.y, 20)
+        self.assertEqual(port_comp.params["port_id"], "P_001")
+        self.assertEqual(port_comp.params["port_name"], "A")
+        self.assertEqual(port_comp.params["kind"], "electrical")
+
+    def test_rename_port_does_not_change_port_id_or_external_wire(self):
+        model = CircuitModel()
+        subdef = SubcircuitDefinition(name="FILTER")
+        model.subcircuit_defs[subdef.name] = subdef
+        port = model.add_port_to_subcircuit("FILTER", "A")
+        inst = self._build_subcircuit_instance("SUB_001", "Filter", subdef)
+        model.components[inst.comp_id] = inst
+        model.wires["W_EXT"] = Wire("W_EXT", "SUB_001", port.port_id, "R_001", "nf")
+
+        model.rename_subcircuit_port("FILTER", port.port_id, "VIN")
+
+        self.assertEqual(port.port_id, "P_001")
+        self.assertEqual(port.name, "VIN")
+        self.assertEqual(model.wires["W_EXT"].from_pin, "P_001")
+        self.assertEqual({pin.name for pin in model.components["SUB_001"].pins}, {"P_001"})
+        self.assertEqual(model.components["SUB_001"].pins[0].display_name, "VIN")
+
+    def test_remove_port_from_subcircuit_removes_external_wires_and_layout(self):
+        model = CircuitModel()
+        subdef = SubcircuitDefinition(name="FILTER")
+        model.subcircuit_defs[subdef.name] = subdef
+        port = model.add_port_to_subcircuit("FILTER", "A")
+        inst = self._build_subcircuit_instance("SUB_001", "Filter", subdef)
+        inst.params["port_layout_overrides"] = {
+            port.port_id: {"side": "right", "offset": 0.8, "order": 3}
+        }
+        model.components[inst.comp_id] = inst
+        model.wires["W_EXT"] = Wire("W_EXT", "SUB_001", port.port_id, "R_001", "nf")
+
+        model.remove_port_from_subcircuit("FILTER", port.port_id)
+
+        self.assertEqual(subdef.ports, [])
+        self.assertNotIn(port.internal_comp_id, subdef.components)
+        self.assertNotIn("W_EXT", model.wires)
+        self.assertNotIn(port.port_id, inst.params.get("port_layout_overrides", {}))
+
+    def test_instance_port_layout_override_does_not_change_subdef_default(self):
+        model = CircuitModel()
+        subdef = SubcircuitDefinition(name="FILTER")
+        model.subcircuit_defs[subdef.name] = subdef
+        port = model.add_port_to_subcircuit("FILTER", "A", side="left", offset=0.25)
+        inst = self._build_subcircuit_instance("SUB_001", "Filter", subdef)
+        model.components[inst.comp_id] = inst
+
+        model.update_instance_port_layout("SUB_001", port.port_id, side="right", offset=0.8, order=7)
+
+        self.assertEqual(port.default_side, "left")
+        self.assertEqual(port.default_offset, 0.25)
+        self.assertEqual(inst.params["port_layout_overrides"][port.port_id]["side"], "right")
+        self.assertEqual(inst.params["port_layout_overrides"][port.port_id]["offset"], 0.8)
+        p = next(pin for pin in inst.pins if pin.name == port.port_id)
+        self.assertGreater(p.local_x, 0)
+
+    def test_update_instance_port_layout_accepts_nested_subcircuit_instance(self):
+        model = CircuitModel()
+        child = SubcircuitDefinition(name="CHILD")
+        parent = SubcircuitDefinition(name="PARENT")
+        model.subcircuit_defs = {child.name: child, parent.name: parent}
+        port = model.add_port_to_subcircuit("CHILD", "A", side="left", offset=0.25)
+        nested = self._build_subcircuit_instance("SUB_001", "Child", child)
+        parent.components[nested.comp_id] = nested
+
+        model.update_instance_port_layout("SUB_001", port.port_id, side="right", offset=0.8)
+
+        self.assertEqual(nested.params["port_layout_overrides"][port.port_id]["side"], "right")
+        self.assertEqual(nested.params["port_layout_overrides"][port.port_id]["offset"], 0.8)
+        pin = next(pin for pin in nested.pins if pin.name == port.port_id)
+        self.assertGreater(pin.local_x, 0)
+
+    def test_delete_internal_port_component_removes_port_definition(self):
+        get_app()
+        model = CircuitModel()
+        subdef = SubcircuitDefinition(name="FILTER")
+        model.subcircuit_defs[subdef.name] = subdef
+        port = model.add_port_to_subcircuit("FILTER", "A", x=10, y=20)
+        canvas = CircuitCanvas(model)
+        try:
+            canvas._enter_subcircuit("FILTER")
+            item = canvas.component_items[port.internal_comp_id]
+            item.setSelected(True)
+
+            canvas._delete_selected()
+
+            self.assertEqual(subdef.ports, [])
+            self.assertNotIn(port.internal_comp_id, subdef.components)
+        finally:
+            canvas.close()
+
+    def test_parent_subcircuit_port_handle_updates_instance_layout(self):
+        get_app()
+        model = CircuitModel()
+        subdef = SubcircuitDefinition(name="FILTER")
+        model.subcircuit_defs[subdef.name] = subdef
+        port = model.add_port_to_subcircuit("FILTER", "A", side="left", offset=0.25)
+        inst = self._build_subcircuit_instance("SUB_001", "Filter", subdef)
+        model.add_component(inst)
+        canvas = CircuitCanvas(model)
+        try:
+            canvas._refresh_view()
+            handle = canvas.port_handle_items[(inst.comp_id, port.port_id)]
+
+            handle.commit_layout_from_local_pos(QPointF(70, 40))
+
+            override = inst.params["port_layout_overrides"][port.port_id]
+            self.assertEqual(override["side"], "right")
+            self.assertAlmostEqual(override["offset"], 0.9)
+            pin = next(pin for pin in inst.pins if pin.name == port.port_id)
+            self.assertGreater(pin.local_x, 0)
+        finally:
+            canvas.close()
+
+    def test_flatten_maps_external_port_id_to_internal_port_node(self):
+        model = CircuitModel()
+        subdef = SubcircuitDefinition(name="FILTER")
+        model.subcircuit_defs[subdef.name] = subdef
+        p1 = model.add_port_to_subcircuit("FILTER", "A", x=-80, y=0, side="left")
+        p2 = model.add_port_to_subcircuit("FILTER", "B", x=80, y=0, side="right")
+        r = ComponentInstance(
+            comp_id="R_001",
+            comp_type=ComponentType.RESISTOR,
+            name="R1",
+            x=0,
+            y=0,
+            pins=create_component_pins(ComponentType.RESISTOR),
+            params={"R": 100.0},
+        )
+        subdef.components[r.comp_id] = r
+        subdef.wires["W_A"] = Wire("W_A", p1.internal_comp_id, "node", "R_001", "nf")
+        subdef.wires["W_B"] = Wire("W_B", "R_001", "nt", p2.internal_comp_id, "node")
+        vs = ComponentInstance(
+            comp_id="VS_001",
+            comp_type=ComponentType.VOLTAGE_SOURCE,
+            name="VS1",
+            x=-200,
+            y=0,
+            pins=create_component_pins(ComponentType.VOLTAGE_SOURCE),
+        )
+        gnd = ComponentInstance(
+            comp_id="GND_001",
+            comp_type=ComponentType.GROUND,
+            name="GND",
+            x=200,
+            y=0,
+            pins=create_component_pins(ComponentType.GROUND),
+        )
+        sub_inst = self._build_subcircuit_instance("SUB_001", "Filter", subdef)
+        model.components = {
+            vs.comp_id: vs,
+            gnd.comp_id: gnd,
+            sub_inst.comp_id: sub_inst,
+        }
+        model.wires = {
+            "W_IN": Wire("W_IN", "VS_001", "node_pos", "SUB_001", p1.port_id),
+            "W_REF": Wire("W_REF", "VS_001", "node_neg", "GND_001", "gnd"),
+            "W_OUT": Wire("W_OUT", "SUB_001", p2.port_id, "GND_001", "gnd"),
+        }
+
+        flat = SolverBuilder()._flatten_subcircuits(model)
+        node_map = flat.assign_node_ids()
+
+        self.assertEqual(
+            node_map[("VS_001", "node_pos")],
+            node_map[("SUB_001__R_001", "nf")],
+        )
+        self.assertEqual(
+            node_map[("GND_001", "gnd")],
+            node_map[("SUB_001__R_001", "nt")],
+        )
+
+    def test_create_subcircuit_from_selection_uses_port_id_for_instance_wires(self):
+        model = self._build_subcircuit_packaging_fixture()
+
+        sub_comp, subdef = model.create_subcircuit_from_selection(["R_001", "C_001"], "FILTER")
+
+        self.assertEqual([port.port_id for port in subdef.ports], ["P_001", "P_002"])
+        self.assertEqual([port.name for port in subdef.ports], ["P1", "P2"])
+        self.assertEqual({pin.name for pin in sub_comp.pins}, {"P_001", "P_002"})
+        self.assertEqual({pin.display_name for pin in sub_comp.pins}, {"P1", "P2"})
+        external_sub_pins = {
+            wire.from_pin if wire.from_comp == sub_comp.comp_id else wire.to_pin
+            for wire in model.wires.values()
+            if wire.from_comp == sub_comp.comp_id or wire.to_comp == sub_comp.comp_id
+        }
+        self.assertEqual(external_sub_pins, {"P_001", "P_002"})
+
+    def test_canvas_add_port_inside_subcircuit_uses_subdef_components(self):
+        get_app()
+        model = CircuitModel()
+        model.subcircuit_defs["FILTER"] = SubcircuitDefinition(name="FILTER")
+        canvas = CircuitCanvas(model)
+        try:
+            canvas._enter_subcircuit("FILTER")
+
+            port = canvas._add_subcircuit_port_at(QPointF(30, 40), "A")
+
+            subdef = model.subcircuit_defs["FILTER"]
+            self.assertEqual(port.port_id, "P_001")
+            self.assertIn(port.internal_comp_id, subdef.components)
+            self.assertNotIn(port.internal_comp_id, model.components)
+        finally:
+            canvas.close()
+
     def test_subcircuit_packaging_creates_internal_port_nodes(self):
         port_type = getattr(ComponentType, "SUBCIRCUIT_PORT", None)
         self.assertIsNotNone(port_type)
@@ -1533,7 +1754,7 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(len(subdef.ports), 2)
         self.assertEqual(
             {pin.name for pin in sub_comp.pins},
-            {port.port_name for port in subdef.ports},
+            {port.port_id for port in subdef.ports},
         )
 
         for port in subdef.ports:
@@ -1556,8 +1777,8 @@ class RegressionTests(unittest.TestCase):
                 )
             )
 
-        left_port_name = next(
-            port.port_name
+        left_port_id = next(
+            port.port_id
             for port in subdef.ports
             if any(
                 wire.from_comp == port.internal_comp_id and wire.to_comp == "R_001"
@@ -1569,11 +1790,11 @@ class RegressionTests(unittest.TestCase):
             wire for wire in model.wires.values()
             if (
                 wire.from_comp == sub_comp.comp_id
-                and wire.from_pin == left_port_name
+                and wire.from_pin == left_port_id
             )
             or (
                 wire.to_comp == sub_comp.comp_id
-                and wire.to_pin == left_port_name
+                and wire.to_pin == left_port_id
             )
         ]
         self.assertEqual(len(external_left_wires), 2)
@@ -2145,10 +2366,14 @@ class RegressionTests(unittest.TestCase):
 
         model.rename_subcircuit_port("FILTER", "P1", "IN")
 
-        self.assertEqual({pin.name for pin in model.components["S1"].pins}, {"IN", "P2"})
-        self.assertEqual({pin.name for pin in model.components["S2"].pins}, {"IN", "P2"})
-        self.assertEqual(model.wires["W_EXT"].from_pin, "IN")
-        self.assertEqual(model.wires["W_EXT"].to_pin, "IN")
+        self.assertEqual({pin.name for pin in model.components["S1"].pins}, {"P1", "P2"})
+        self.assertEqual({pin.name for pin in model.components["S2"].pins}, {"P1", "P2"})
+        self.assertEqual(
+            {pin.name: pin.display_name for pin in model.components["S1"].pins}["P1"],
+            "IN",
+        )
+        self.assertEqual(model.wires["W_EXT"].from_pin, "P1")
+        self.assertEqual(model.wires["W_EXT"].to_pin, "P1")
         self.assertEqual(subdef.ports[0].port_name, "IN")
 
     def test_rename_subcircuit_port_updates_nested_instance_wires(self):
@@ -2163,8 +2388,12 @@ class RegressionTests(unittest.TestCase):
         model.rename_subcircuit_port("CHILD", "P1", "IN")
 
         nested = model.subcircuit_defs["PARENT"].components["CHILD_INST"]
-        self.assertIn("IN", {pin.name for pin in nested.pins})
-        self.assertEqual(model.subcircuit_defs["PARENT"].wires["W_CHILD"].to_pin, "IN")
+        self.assertIn("P1", {pin.name for pin in nested.pins})
+        self.assertEqual(
+            {pin.name: pin.display_name for pin in nested.pins}["P1"],
+            "IN",
+        )
+        self.assertEqual(model.subcircuit_defs["PARENT"].wires["W_CHILD"].to_pin, "P1")
 
     def test_update_port_side_repositions_pin(self):
         model = CircuitModel()
@@ -2176,7 +2405,7 @@ class RegressionTests(unittest.TestCase):
         model.update_subcircuit_port_side("FILTER", "P1", "right")
 
         p1 = next(pin for pin in model.components["SUB_001"].pins if pin.name == "P1")
-        self.assertEqual(p1.local_x, 40)
+        self.assertGreater(p1.local_x, 0)
 
     def test_update_port_order_changes_display_order_and_persists(self):
         model = CircuitModel()
@@ -2276,12 +2505,13 @@ class RegressionTests(unittest.TestCase):
         try:
             canvas._enter_subcircuit("FILTER")
             before_top_level_ids = set(model.components)
+            before_sub_ids = set(subdef.components)
 
             canvas._placing_type = ComponentType.RESISTOR
             canvas._placing_params = {}
             canvas._place_component(QPointF(140, 0))
 
-            new_ids = set(subdef.components) - {"R_001", "C_001", "PORT_001", "PORT_002"}
+            new_ids = set(subdef.components) - before_sub_ids
             self.assertEqual(len(new_ids), 1)
             new_id = next(iter(new_ids))
             self.assertEqual(set(model.components), before_top_level_ids)

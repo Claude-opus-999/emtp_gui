@@ -128,9 +128,23 @@ def draw_subcircuit_port(painter, component=None):
 def draw_subcircuit(painter, component):
     painter.setPen(line_pen())
     painter.setBrush(no_brush())
-    rect = QRectF(-45, -28, 90, 56)
+    xs = [abs(pin.local_x) for pin in component.pins] or [50]
+    ys = [abs(pin.local_y) for pin in component.pins] or [50]
+    half_w = max(50, max(xs))
+    half_h = max(50, max(ys))
+    rect = QRectF(-half_w, -half_h, half_w * 2, half_h * 2)
     painter.drawRect(rect)
     painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, component.name)
+    for pin in component.pins:
+        label = pin.display_name or pin.name
+        if pin.local_x < 0:
+            draw_text(painter, label, pin.local_x - 34, pin.local_y + 3, 7)
+        elif pin.local_x > 0:
+            draw_text(painter, label, pin.local_x + 8, pin.local_y + 3, 7)
+        elif pin.local_y < 0:
+            draw_text(painter, label, pin.local_x - 10, pin.local_y - 8, 7)
+        else:
+            draw_text(painter, label, pin.local_x - 10, pin.local_y + 16, 7)
 
 
 PRIMITIVE_DRAWERS = {}

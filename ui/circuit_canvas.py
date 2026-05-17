@@ -66,7 +66,15 @@ class ComponentGraphicsItem(QGraphicsItem):
 
         # 元件尺寸
         if component.comp_type == ComponentType.SUBCIRCUIT:
-            self._bounding_rect = QRectF(-50, -35, 100, 70)
+            xs = [pin.local_x for pin in component.pins] or [0]
+            ys = [pin.local_y for pin in component.pins] or [0]
+            half_w = max(50.0, max(abs(x) for x in xs))
+            half_h = max(50.0, max(abs(y) for y in ys))
+            left = min(-half_w - 12, min(xs) - 36)
+            right = max(half_w + 12, max(xs) + 36)
+            top = min(-half_h - 18, min(ys) - 24)
+            bottom = max(half_h + 22, max(ys) + 24)
+            self._bounding_rect = QRectF(left, top, right - left, bottom - top)
         elif component.comp_type == ComponentType.UMEC_TRANSFORMER:
             self._bounding_rect = QRectF(-100, -75, 200, 160)
         elif component.comp_type == ComponentType.PROBE:
@@ -318,14 +326,15 @@ class ComponentGraphicsItem(QGraphicsItem):
             painter.drawRect(int(pin.local_x) - 4, int(pin.local_y) - 4, 8, 8)
             # 端口名称
             painter.setPen(QColor("#0369a1"))
+            label = pin.display_name or pin.name
             if pin.local_x < 0:
-                painter.drawText(QPointF(pin.local_x - 25, pin.local_y + 4), pin.name)
+                painter.drawText(QPointF(pin.local_x - 25, pin.local_y + 4), label)
             elif pin.local_x > 0:
-                painter.drawText(QPointF(pin.local_x + 8, pin.local_y + 4), pin.name)
+                painter.drawText(QPointF(pin.local_x + 8, pin.local_y + 4), label)
             elif pin.local_y < 0:
-                painter.drawText(QPointF(-8, pin.local_y - 8), pin.name)
+                painter.drawText(QPointF(-8, pin.local_y - 8), label)
             else:
-                painter.drawText(QPointF(-8, pin.local_y + 16), pin.name)
+                painter.drawText(QPointF(-8, pin.local_y + 16), label)
 
     def _draw_series_rl(self, painter: QPainter):
         """绘制串联RL符号: R锯齿 + L半圆串联"""
@@ -564,6 +573,86 @@ class ComponentGraphicsItem(QGraphicsItem):
         x = round(pos.x() / grid) * grid
         y = round(pos.y() / grid) * grid
         return QPointF(x, y)
+
+class SubcircuitPortHandleItem(QGraphicsItem):
+    """Draggable handle for editing one SUBCIRCUIT instance port layout."""
+
+    def __init__(self, canvas: 'CircuitCanvas', component_item: ComponentGraphicsItem, port_id: str):
+        super().__init__(component_item)
+        self.canvas = canvas
+        self.component_item = component_item
+        self.component = component_item.component
+        self.port_id = port_id
+        self._drag_started = False
+        self._syncing = False
+        self.setFlag(QGraphicsItem.ItemIsMovable, True)
+        self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.setZValue(40)
+        self.sync_from_component()
+
+    def boundingRect(self) -> QRectF:
+        return QRectF(-6, -6, 12, 12)
+
+    def shape(self) -> QPainterPath:
+        path = QPainterPath()
+        path.addEllipse(self.boundingRect())
+        return path
+
+    def paint(self, painter: QPainter, option, widget=None):
+        painter.setPen(QPen(QColor("#0f766e"), 1.5))
+        painter.setBrush(QBrush(QColor("#ccfbf1")))
+        painter.drawEllipse(self.boundingRect())
+
+    def sync_from_component(self):
+        pin = next((pin for pin in self.component.pins if pin.name == self.port_id), None)
+        if pin is None:
+            return
+        self._syncing = True
+        self.setPos(QPointF(pin.local_x, pin.local_y))
+        self._syncing = False
+
+    def commit_layout_from_local_pos(self, local_pos: QPointF):
+        side, offset = self.canvas._nearest_subcircuit_side_and_offset(
+            self.component,
+            local_pos,
+        )
+        self.canvas.model.update_instance_port_layout(
+            self.component.comp_id,
+            self.port_id,
+            side=side,
+            offset=offset,
+        )
+        self.canvas._refresh_view()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_started = False
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        should_commit = self._drag_started
+        local_pos = QPointF(self.pos())
+        self._drag_started = False
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
+        super().mouseReleaseEvent(event)
+        if should_commit:
+            self.commit_layout_from_local_pos(local_pos)
+
+    def itemChange(self, change, value):
+        if self._syncing:
+            return super().itemChange(change, value)
+        if change == QGraphicsItem.ItemPositionChange:
+            self._drag_started = True
+            side, offset = self.canvas._nearest_subcircuit_side_and_offset(
+                self.component,
+                value,
+            )
+            return self.canvas._subcircuit_port_anchor(self.component, side, offset)
+        if change == QGraphicsItem.ItemPositionHasChanged:
+            self._drag_started = True
+        return super().itemChange(change, value)
 
 
 class WireGraphicsItem(QGraphicsItem):
@@ -921,6 +1010,7 @@ class CircuitCanvas(QGraphicsView):
         self.wire_items: Dict[str, WireGraphicsItem] = {}
         self.wire_waypoint_items: Dict[Tuple[str, int], WireWaypointGraphicsItem] = {}
         self.wire_intersection_items: List[QGraphicsEllipseItem] = []
+        self.port_handle_items: Dict[Tuple[str, str], SubcircuitPortHandleItem] = {}
 
         # 复制粘贴剪贴板 — 同时保存元件和它们之间的连线
         self._clipboard: Optional[Dict] = None  # {'components': {...}, 'wires': {...}}
@@ -1095,6 +1185,79 @@ class CircuitCanvas(QGraphicsView):
         if subdef is not None:
             return subdef.components, subdef.wires
         return self.model.components, self.model.wires
+
+    def _subcircuit_symbol_rect(self, comp: ComponentInstance) -> QRectF:
+        sub_name = comp.params.get("subcircuit_name", "")
+        subdef = self.model.subcircuit_defs.get(sub_name)
+        if subdef is not None:
+            return QRectF(
+                -float(subdef.symbol_width) / 2.0,
+                -float(subdef.symbol_height) / 2.0,
+                float(subdef.symbol_width),
+                float(subdef.symbol_height),
+            )
+
+        xs = [abs(pin.local_x) for pin in comp.pins] or [50]
+        ys = [abs(pin.local_y) for pin in comp.pins] or [50]
+        half_w = max(50.0, max(xs))
+        half_h = max(50.0, max(ys))
+        return QRectF(-half_w, -half_h, half_w * 2.0, half_h * 2.0)
+
+    def _subcircuit_port_anchor(self, comp: ComponentInstance, side: str, offset: float) -> QPointF:
+        rect = self._subcircuit_symbol_rect(comp)
+        offset = max(0.0, min(1.0, float(offset)))
+        if side == "left":
+            return QPointF(rect.left(), rect.top() + offset * rect.height())
+        if side == "right":
+            return QPointF(rect.right(), rect.top() + offset * rect.height())
+        if side == "top":
+            return QPointF(rect.left() + offset * rect.width(), rect.top())
+        if side == "bottom":
+            return QPointF(rect.left() + offset * rect.width(), rect.bottom())
+        return QPointF(rect.left(), rect.top() + offset * rect.height())
+
+    def _nearest_subcircuit_side_and_offset(
+        self,
+        comp: ComponentInstance,
+        local_pos: QPointF,
+    ) -> Tuple[str, float]:
+        rect = self._subcircuit_symbol_rect(comp)
+        distances = {
+            "left": abs(local_pos.x() - rect.left()),
+            "right": abs(local_pos.x() - rect.right()),
+            "top": abs(local_pos.y() - rect.top()),
+            "bottom": abs(local_pos.y() - rect.bottom()),
+        }
+        side = min(distances, key=distances.get)
+        if side in ("left", "right"):
+            offset = (local_pos.y() - rect.top()) / rect.height()
+        else:
+            offset = (local_pos.x() - rect.left()) / rect.width()
+        return side, max(0.0, min(1.0, float(offset)))
+
+    def _add_subcircuit_port_handles(self, item: ComponentGraphicsItem):
+        comp = item.component
+        if comp.comp_type != ComponentType.SUBCIRCUIT:
+            return
+        for pin in comp.pins:
+            handle = SubcircuitPortHandleItem(self, item, pin.name)
+            self.port_handle_items[(comp.comp_id, pin.name)] = handle
+
+    def _add_subcircuit_port_at(self, scene_pos: QPointF, port_name: str = None):
+        subdef = self._active_subcircuit_def()
+        if subdef is None:
+            raise ValueError("Not editing a subcircuit")
+        pos = self.snap_to_grid(scene_pos)
+        if port_name is None:
+            port_name = f"P{len(subdef.ports) + 1}"
+        port = self.model.add_port_to_subcircuit(
+            subdef.name,
+            port_name,
+            x=pos.x(),
+            y=pos.y(),
+        )
+        self._refresh_view()
+        return port
 
     def _wire_endpoint_positions(self, wire: Wire) -> Tuple[Optional[QPointF], Optional[QPointF]]:
         start_item = self.component_items.get(wire.from_comp)
@@ -1395,11 +1558,40 @@ class CircuitCanvas(QGraphicsView):
         subdef.wires[wire.wire_id] = wire
         self.model._notify("wire_added")
 
+    def _confirm_remove_subcircuit_port(self, subdef_name: str, port_id: str) -> bool:
+        external_wires = self.model.find_external_wires_using_port(subdef_name, port_id)
+        if not external_wires:
+            return True
+        from PySide6.QtWidgets import QMessageBox
+
+        result = QMessageBox.question(
+            self,
+            "Delete Subcircuit Port",
+            (
+                f"This port is used by {len(external_wires)} external wire(s).\n"
+                "Deleting it will remove those wires. Continue?"
+            ),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return result == QMessageBox.StandardButton.Yes
+
     def _remove_component_from_active_design(self, comp_id: str):
         subdef = self._active_subcircuit_def()
         if subdef is None:
             self.model.remove_component(comp_id)
             return
+        comp = subdef.components.get(comp_id)
+        if comp is not None and comp.comp_type == ComponentType.SUBCIRCUIT_PORT:
+            port = next(
+                (port for port in subdef.ports if port.internal_comp_id == comp_id),
+                None,
+            )
+            if port is not None:
+                if not self._confirm_remove_subcircuit_port(subdef.name, port.port_id):
+                    return
+                self.model.remove_port_from_subcircuit(subdef.name, port.port_id)
+                return
         self.model._save_undo_state()
         if comp_id in subdef.components:
             del subdef.components[comp_id]
@@ -1504,6 +1696,16 @@ class CircuitCanvas(QGraphicsView):
 
         params = get_default_params(self._placing_type)
         params.update(self._placing_params)
+        if (
+            self._placing_type == ComponentType.SUBCIRCUIT_PORT
+            and self._active_subcircuit_def() is not None
+        ):
+            self._add_subcircuit_port_at(pos, params.get("port_name"))
+            self.set_mode(CanvasMode.SELECT)
+            self._placing_type = None
+            self._placing_params = {}
+            self.placement_completed.emit()
+            return
         probe_type = params.get('probe_type') if self._placing_type == ComponentType.PROBE else None
         pin_count = params.get('n_phases', 3)
         if self._placing_type == ComponentType.LCP_OHL:
@@ -2129,8 +2331,18 @@ class CircuitCanvas(QGraphicsView):
                               if isinstance(item, ComponentGraphicsItem)]
             subcircuit_act.setEnabled(len(selected_comps) >= 2)
             manage_ports_act = None
+            instance_layout_act = None
+            reset_instance_layout_act = None
+            rename_port_act = None
             if item.component.comp_type == ComponentType.SUBCIRCUIT:
                 manage_ports_act = menu.addAction("Manage Ports")
+                instance_layout_act = menu.addAction("Edit Instance Port Layout")
+                reset_instance_layout_act = menu.addAction("Reset Instance Port Layout")
+            if (
+                item.component.comp_type == ComponentType.SUBCIRCUIT_PORT
+                and self._active_subcircuit_def() is not None
+            ):
+                rename_port_act = menu.addAction("Rename Port")
             menu.addSeparator()
             prop_act = menu.addAction("属性")
 
@@ -2152,6 +2364,13 @@ class CircuitCanvas(QGraphicsView):
             elif manage_ports_act is not None and action == manage_ports_act:
                 sub_name = item.component.params.get("subcircuit_name", "")
                 self._manage_subcircuit_ports(sub_name)
+            elif instance_layout_act is not None and action == instance_layout_act:
+                self._manage_instance_port_layout(item.component)
+            elif reset_instance_layout_act is not None and action == reset_instance_layout_act:
+                self.model.reset_instance_port_layout(item.component.comp_id)
+                self._refresh_view()
+            elif rename_port_act is not None and action == rename_port_act:
+                self._rename_subcircuit_port_component(item.component)
         else:
             # 右击空白处 — 检查是否右击了引脚
             pin_info = self.get_pin_at(scene_pos)
@@ -2172,8 +2391,10 @@ class CircuitCanvas(QGraphicsView):
             menu.addSeparator()
             # 如果在子电路编辑模式，显示退出选项
             exit_sub_act = None
+            add_port_act = None
             if self._editing_subcircuit:
                 exit_sub_act = menu.addAction("🔙 退出子电路编辑")
+                add_port_act = menu.addAction("Add Electrical Port")
                 menu.addSeparator()
             zoom_in_act = menu.addAction("放大")
             zoom_out_act = menu.addAction("缩小")
@@ -2183,8 +2404,10 @@ class CircuitCanvas(QGraphicsView):
             ground_act = menu.addAction("添加接地")
 
             action = menu.exec(event.globalPos())
-            if action == exit_sub_act:
+            if exit_sub_act is not None and action == exit_sub_act:
                 self._exit_subcircuit()
+            elif add_port_act is not None and action == add_port_act:
+                self._add_subcircuit_port_at(scene_pos)
             elif action == paste_act:
                 self._paste_clipboard(scene_pos)
             elif action == zoom_in_act:
@@ -2315,6 +2538,120 @@ class CircuitCanvas(QGraphicsView):
         # 刷新画布
         self._refresh_view()
 
+    def _rename_subcircuit_port_component(self, comp: ComponentInstance):
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+
+        subdef = self._active_subcircuit_def()
+        if subdef is None:
+            return
+        port = next(
+            (port for port in subdef.ports if port.internal_comp_id == comp.comp_id),
+            None,
+        )
+        if port is None:
+            QMessageBox.warning(self, "Subcircuit Ports", "Port definition not found.")
+            return
+
+        name, ok = QInputDialog.getText(
+            self,
+            "Rename Port",
+            "Port name:",
+            text=port.port_name,
+        )
+        if not ok:
+            return
+        try:
+            self.model.rename_subcircuit_port(subdef.name, port.port_id, name)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Subcircuit Ports", str(exc))
+            return
+        self._refresh_view()
+
+    def _manage_instance_port_layout(self, instance: ComponentInstance):
+        from PySide6.QtWidgets import (
+            QComboBox,
+            QDialog,
+            QDialogButtonBox,
+            QDoubleSpinBox,
+            QHeaderView,
+            QMessageBox,
+            QSpinBox,
+            QTableWidget,
+            QTableWidgetItem,
+            QVBoxLayout,
+        )
+
+        sub_name = instance.params.get("subcircuit_name", "")
+        subdef = self.model.subcircuit_defs.get(sub_name)
+        if subdef is None:
+            QMessageBox.warning(self, "Subcircuit Ports", f"Subcircuit definition not found: {sub_name}")
+            return
+
+        ports = [port for port in subdef.ports if port.visible]
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Instance Port Layout - {instance.name}")
+        dialog.resize(520, 320)
+        layout = QVBoxLayout(dialog)
+
+        table = QTableWidget(len(ports), 4, dialog)
+        table.setHorizontalHeaderLabels(["Name", "Side", "Offset", "Order"])
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+
+        rows = []
+        for row, port in enumerate(ports):
+            effective = subdef.get_effective_port_layout(port, instance)
+            rows.append(port.port_id)
+            name_item = QTableWidgetItem(port.port_name)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            table.setItem(row, 0, name_item)
+
+            side_combo = QComboBox(table)
+            side_combo.addItems(["left", "right", "top", "bottom"])
+            side_combo.setCurrentText(effective["side"])
+            table.setCellWidget(row, 1, side_combo)
+
+            offset_spin = QDoubleSpinBox(table)
+            offset_spin.setRange(0.0, 1.0)
+            offset_spin.setSingleStep(0.05)
+            offset_spin.setDecimals(3)
+            offset_spin.setValue(0.5 if effective["offset"] is None else float(effective["offset"]))
+            table.setCellWidget(row, 2, offset_spin)
+
+            order_spin = QSpinBox(table)
+            order_spin.setRange(-9999, 9999)
+            order_spin.setValue(int(effective["order"]))
+            table.setCellWidget(row, 3, order_spin)
+
+        layout.addWidget(table)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        try:
+            for row, port_id in enumerate(rows):
+                self.model.update_instance_port_layout(
+                    instance.comp_id,
+                    port_id,
+                    side=table.cellWidget(row, 1).currentText(),
+                    offset=table.cellWidget(row, 2).value(),
+                    order=table.cellWidget(row, 3).value(),
+                )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Subcircuit Ports", str(exc))
+            return
+
+        self._refresh_view()
+
     def _manage_subcircuit_ports(self, sub_name: str):
         """Edit electrical ports for a subcircuit definition."""
         from PySide6.QtWidgets import (
@@ -2322,6 +2659,7 @@ class CircuitCanvas(QGraphicsView):
             QComboBox,
             QDialog,
             QDialogButtonBox,
+            QDoubleSpinBox,
             QHeaderView,
             QMessageBox,
             QSpinBox,
@@ -2350,10 +2688,11 @@ class CircuitCanvas(QGraphicsView):
         dialog.resize(720, 360)
         layout = QVBoxLayout(dialog)
 
-        table = QTableWidget(len(ports), 6, dialog)
+        table = QTableWidget(len(ports), 7, dialog)
         table.setHorizontalHeaderLabels([
             "Name",
             "Side",
+            "Offset",
             "Order",
             "Description",
             "Internal Component",
@@ -2364,15 +2703,18 @@ class CircuitCanvas(QGraphicsView):
         table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
 
         original_rows = []
         for row, port in enumerate(ports):
             original_rows.append({
+                "port_id": port.port_id,
                 "name": port.port_name,
                 "side": port.side,
+                "offset": port.default_offset,
                 "order": int(port.order),
                 "description": port.description,
             })
@@ -2385,20 +2727,27 @@ class CircuitCanvas(QGraphicsView):
                 side_combo.setCurrentText(port.side)
             table.setCellWidget(row, 1, side_combo)
 
+            offset_spin = QDoubleSpinBox(table)
+            offset_spin.setRange(0.0, 1.0)
+            offset_spin.setSingleStep(0.05)
+            offset_spin.setDecimals(3)
+            offset_spin.setValue(0.5 if port.default_offset is None else float(port.default_offset))
+            table.setCellWidget(row, 2, offset_spin)
+
             order_spin = QSpinBox(table)
             order_spin.setRange(-9999, 9999)
             order_spin.setValue(int(port.order))
-            table.setCellWidget(row, 2, order_spin)
+            table.setCellWidget(row, 3, order_spin)
 
-            table.setItem(row, 3, QTableWidgetItem(port.description))
+            table.setItem(row, 4, QTableWidgetItem(port.description))
 
             comp_item = QTableWidgetItem(port.internal_comp_id)
             comp_item.setFlags(comp_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            table.setItem(row, 4, comp_item)
+            table.setItem(row, 5, comp_item)
 
             pin_item = QTableWidgetItem(port.internal_pin_name)
             pin_item.setFlags(pin_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            table.setItem(row, 5, pin_item)
+            table.setItem(row, 6, pin_item)
 
         layout.addWidget(table)
 
@@ -2417,20 +2766,23 @@ class CircuitCanvas(QGraphicsView):
         names = []
         for row, original in enumerate(original_rows):
             name_item = table.item(row, 0)
-            desc_item = table.item(row, 3)
+            desc_item = table.item(row, 4)
             new_name = (name_item.text() if name_item else "").strip()
             if not new_name:
                 QMessageBox.warning(self, "Subcircuit Ports", "Port names cannot be empty.")
                 return
             names.append(new_name)
             rows.append({
+                "port_id": original["port_id"],
                 "old_name": original["name"],
                 "old_side": original["side"],
+                "old_offset": original["offset"],
                 "old_order": original["order"],
                 "old_description": original["description"],
                 "new_name": new_name,
                 "side": table.cellWidget(row, 1).currentText(),
-                "order": table.cellWidget(row, 2).value(),
+                "offset": table.cellWidget(row, 2).value(),
+                "order": table.cellWidget(row, 3).value(),
                 "description": desc_item.text() if desc_item else "",
             })
 
@@ -2440,18 +2792,25 @@ class CircuitCanvas(QGraphicsView):
 
         try:
             for row in rows:
-                current_name = row["old_name"]
-                if row["new_name"] != current_name:
-                    self.model.rename_subcircuit_port(sub_name, current_name, row["new_name"])
-                    current_name = row["new_name"]
-                if row["side"] != row["old_side"]:
-                    self.model.update_subcircuit_port_side(sub_name, current_name, row["side"])
-                if row["order"] != row["old_order"]:
-                    self.model.update_subcircuit_port_order(sub_name, current_name, row["order"])
+                port_id = row["port_id"]
+                if row["new_name"] != row["old_name"]:
+                    self.model.rename_subcircuit_port(sub_name, port_id, row["new_name"])
+                if (
+                    row["side"] != row["old_side"]
+                    or row["offset"] != row["old_offset"]
+                    or row["order"] != row["old_order"]
+                ):
+                    self.model.update_subcircuit_default_port_layout(
+                        sub_name,
+                        port_id,
+                        side=row["side"],
+                        offset=row["offset"],
+                        order=row["order"],
+                    )
                 if row["description"] != row["old_description"]:
                     self.model.update_subcircuit_port_description(
                         sub_name,
-                        current_name,
+                        port_id,
                         row["description"],
                     )
         except ValueError as exc:
@@ -2764,6 +3123,7 @@ class CircuitCanvas(QGraphicsView):
         self.wire_items.clear()
         self.wire_waypoint_items.clear()
         self.wire_intersection_items.clear()
+        self.port_handle_items.clear()
 
         # 重新绘制网格
         self._draw_grid()
@@ -2776,6 +3136,7 @@ class CircuitCanvas(QGraphicsView):
                     item = ComponentGraphicsItem(comp, self.model, self)
                     self.scene.addItem(item)
                     self.component_items[comp.comp_id] = item
+                    self._add_subcircuit_port_handles(item)
                     if comp.comp_id in selected_ids:
                         item.setSelected(True)
                 # 绘制内部连线
@@ -2789,12 +3150,6 @@ class CircuitCanvas(QGraphicsView):
                         ep = end_pins.get(wire.to_pin)
                         if sp and ep:
                             self._add_wire_graphics_item(wire, sp, ep)
-                # 绘制端口标记
-                for port in subdef.ports:
-                    comp = subdef.components.get(port.internal_comp_id)
-                    if comp:
-                        # 在端口引脚旁画标记
-                        pass  # TODO: 端口高亮
                 self._refresh_wire_intersections()
             else:
                 # 子电路定义不存在，退出编辑模式
@@ -2805,6 +3160,7 @@ class CircuitCanvas(QGraphicsView):
                     item = ComponentGraphicsItem(comp, self.model, self)
                     self.scene.addItem(item)
                     self.component_items[comp.comp_id] = item
+                    self._add_subcircuit_port_handles(item)
                     if comp.comp_id in selected_ids:
                         item.setSelected(True)
                 self._refresh_wires()
@@ -2814,6 +3170,7 @@ class CircuitCanvas(QGraphicsView):
                 item = ComponentGraphicsItem(comp, self.model, self)
                 self.scene.addItem(item)
                 self.component_items[comp.comp_id] = item
+                self._add_subcircuit_port_handles(item)
                 if comp.comp_id in selected_ids:
                     item.setSelected(True)
 
