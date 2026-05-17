@@ -1090,6 +1090,12 @@ class CircuitCanvas(QGraphicsView):
             return subdef.wires
         return self.model.wires
 
+    def _active_design(self):
+        subdef = self._active_subcircuit_def()
+        if subdef is not None:
+            return subdef.components, subdef.wires
+        return self.model.components, self.model.wires
+
     def _wire_endpoint_positions(self, wire: Wire) -> Tuple[Optional[QPointF], Optional[QPointF]]:
         start_item = self.component_items.get(wire.from_comp)
         end_item = self.component_items.get(wire.to_comp)
@@ -2199,6 +2205,9 @@ class CircuitCanvas(QGraphicsView):
         from models.component_lib import create_component_pins, get_default_params
 
         comp = comp_item.component
+        active_components, _active_wires = self._active_design()
+        if comp.comp_id not in active_components:
+            return
         if pin_name is None:
             # 默认选第一个非地引脚
             for p in comp.pins:
@@ -2243,7 +2252,7 @@ class CircuitCanvas(QGraphicsView):
             pins=create_component_pins(ComponentType.PROBE, probe_type=probe_type),
         )
 
-        self.model.add_component(probe_comp)
+        self._add_component_to_active_design(probe_comp)
 
         # 自动连线：从探针 sense 引脚到目标引脚
         import uuid
@@ -2254,7 +2263,8 @@ class CircuitCanvas(QGraphicsView):
             to_comp=comp.comp_id,
             to_pin=pin_name,
         )
-        self.model.add_wire(wire)
+        self._add_wire_to_active_design(wire)
+        self._refresh_view()
 
     def _create_subcircuit_from_selection(self):
         """将选中元件封装为子电路"""
@@ -2281,7 +2291,18 @@ class CircuitCanvas(QGraphicsView):
             return
 
         comp_ids = [item.component.comp_id for item in selected_comps]
-        result = self.model.create_subcircuit_from_selection(comp_ids, name)
+        active_components, active_wires = self._active_design()
+        try:
+            result = self.model.create_subcircuit_from_design_selection(
+                components=active_components,
+                wires=active_wires,
+                comp_ids=comp_ids,
+                name=name,
+            )
+        except ValueError as exc:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "错误", str(exc))
+            return
 
         if result is None:
             from PySide6.QtWidgets import QMessageBox
@@ -2497,9 +2518,30 @@ class CircuitCanvas(QGraphicsView):
 
     def _rotate_selected(self):
         """旋转选中的元件"""
-        for item in self.scene.selectedItems():
-            if isinstance(item, ComponentGraphicsItem):
-                self.model.rotate_component(item.component.comp_id, 90)
+        selected_ids = [
+            item.component.comp_id
+            for item in self.scene.selectedItems()
+            if isinstance(item, ComponentGraphicsItem)
+        ]
+        if not selected_ids:
+            return
+
+        subdef = self._active_subcircuit_def()
+        if subdef is None:
+            for comp_id in selected_ids:
+                self.model.rotate_component(comp_id, 90)
+            return
+
+        self.model._save_undo_state()
+        rotated = False
+        for comp_id in selected_ids:
+            comp = subdef.components.get(comp_id)
+            if comp is None:
+                continue
+            comp.rotation = (comp.rotation + 90) % 360
+            rotated = True
+        if rotated:
+            self.model._notify("component_rotated")
 
     def _copy_selected(self):
         """复制选中的元件（及它们之间的连线）到剪贴板"""

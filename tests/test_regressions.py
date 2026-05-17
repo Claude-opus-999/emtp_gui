@@ -1607,6 +1607,45 @@ class RegressionTests(unittest.TestCase):
             node_map[(f"{prefix}C_001", "nt")],
         )
 
+    def test_legacy_numeric_voltage_probe_remaps_after_subcircuit_flatten(self):
+        model = CircuitModel()
+        subdef = self._build_pass_through_subdefinition("CELL")
+        floating = ComponentInstance(
+            comp_id="A_FLOAT",
+            comp_type=ComponentType.RESISTOR,
+            name="Float",
+            x=0,
+            y=80,
+            pins=create_component_pins(ComponentType.RESISTOR),
+        )
+        subdef.components[floating.comp_id] = floating
+        model.subcircuit_defs[subdef.name] = subdef
+        model.components["AAA_SUB"] = self._build_subcircuit_instance("AAA_SUB", "Cell", subdef)
+        target = ComponentInstance(
+            comp_id="ZZZ_R",
+            comp_type=ComponentType.RESISTOR,
+            name="Target",
+            x=250,
+            y=0,
+            pins=create_component_pins(ComponentType.RESISTOR),
+        )
+        model.components[target.comp_id] = target
+        old_node_map = model.assign_node_ids()
+        old_node = old_node_map[("ZZZ_R", "nf")]
+        model.probes.append(ProbeConfig(
+            probe_id="USER_V",
+            probe_type="voltage",
+            node_pos=old_node,
+            node_neg=0,
+        ))
+
+        flat = SolverBuilder()._flatten_subcircuits(model)
+        flat_node_map = flat.assign_node_ids()
+
+        self.assertNotEqual(old_node, flat_node_map[("ZZZ_R", "nf")])
+        self.assertEqual(flat.probes[0].node_pos, flat_node_map[("ZZZ_R", "nf")])
+        self.assertEqual(flat.probes[0].node_neg, 0)
+
     def test_subcircuit_packaging_connects_all_internal_pins_on_boundary_node(self):
         model = CircuitModel()
         for comp in [
@@ -1788,6 +1827,172 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual(flat.components["S1__R_001"].params["R"], 10.0)
         self.assertEqual(flat.components["S2__R_001"].params["R"], 20.0)
+
+    def _build_outer_subdefinition_with_inner(self, inner: SubcircuitDefinition):
+        port_1 = ComponentInstance(
+            comp_id="PORT_001",
+            comp_type=ComponentType.SUBCIRCUIT_PORT,
+            name="P1",
+            x=-100,
+            y=0,
+            pins=create_component_pins(ComponentType.SUBCIRCUIT_PORT),
+            params={"port_name": "P1"},
+        )
+        port_2 = ComponentInstance(
+            comp_id="PORT_002",
+            comp_type=ComponentType.SUBCIRCUIT_PORT,
+            name="P2",
+            x=100,
+            y=0,
+            pins=create_component_pins(ComponentType.SUBCIRCUIT_PORT),
+            params={"port_name": "P2"},
+        )
+        inner_inst = self._build_subcircuit_instance("INNER_INST", "Inner", inner)
+        return SubcircuitDefinition(
+            name="OUTER",
+            components={
+                port_1.comp_id: port_1,
+                port_2.comp_id: port_2,
+                inner_inst.comp_id: inner_inst,
+            },
+            wires={
+                "W_P1": Wire("W_P1", "PORT_001", "node", "INNER_INST", "P1"),
+                "W_P2": Wire("W_P2", "INNER_INST", "P2", "PORT_002", "node"),
+            },
+            ports=[
+                SubcircuitPort("P1", "PORT_001", "node", "left"),
+                SubcircuitPort("P2", "PORT_002", "node", "right"),
+            ],
+        )
+
+    def test_branch_current_probe_inside_subcircuit_references_prefixed_branch(self):
+        model = CircuitModel()
+        subdef = self._build_pass_through_subdefinition("FILTER")
+        probe = ComponentInstance(
+            comp_id="PRB_001",
+            comp_type=ComponentType.PROBE,
+            name="PRB1",
+            x=0,
+            y=-40,
+            params={
+                "probe_type": "branch_current",
+                "unit": "A",
+                "target_comp_id": "R_001",
+                "target_pin": "nf",
+            },
+            pins=create_component_pins(ComponentType.PROBE, probe_type="branch_current"),
+        )
+        subdef.components[probe.comp_id] = probe
+        subdef.wires["W_PRB"] = Wire("W_PRB", "PRB_001", "sense", "R_001", "nf")
+        model.subcircuit_defs[subdef.name] = subdef
+        model.components["SUB_001"] = self._build_subcircuit_instance("SUB_001", "Filter", subdef)
+
+        flat = SolverBuilder()._flatten_subcircuits(model)
+
+        flat_probe = flat.components["SUB_001__PRB_001"]
+        self.assertEqual(flat_probe.params["target_comp_id"], "SUB_001__R_001")
+        self.assertEqual(flat_probe.params["branch_name"], "SUB_001__R1")
+
+    def test_line_current_probe_inside_subcircuit_references_prefixed_line(self):
+        model = CircuitModel()
+        port_1 = ComponentInstance(
+            comp_id="PORT_001",
+            comp_type=ComponentType.SUBCIRCUIT_PORT,
+            name="P1",
+            x=-100,
+            y=0,
+            pins=create_component_pins(ComponentType.SUBCIRCUIT_PORT),
+            params={"port_name": "P1"},
+        )
+        port_2 = ComponentInstance(
+            comp_id="PORT_002",
+            comp_type=ComponentType.SUBCIRCUIT_PORT,
+            name="P2",
+            x=100,
+            y=0,
+            pins=create_component_pins(ComponentType.SUBCIRCUIT_PORT),
+            params={"port_name": "P2"},
+        )
+        line = ComponentInstance(
+            comp_id="TL_001",
+            comp_type=ComponentType.BERGERON,
+            name="TL1",
+            x=0,
+            y=0,
+            pins=create_component_pins(ComponentType.BERGERON),
+            params=get_default_params(ComponentType.BERGERON),
+        )
+        probe = ComponentInstance(
+            comp_id="PRB_001",
+            comp_type=ComponentType.PROBE,
+            name="PRB1",
+            x=0,
+            y=-40,
+            params={
+                "probe_type": "line_current",
+                "unit": "A",
+                "target_comp_id": "TL_001",
+                "line_name": "TL1",
+                "line_end": "m",
+                "line_phase": 0,
+            },
+            pins=create_component_pins(ComponentType.PROBE, probe_type="line_current"),
+        )
+        subdef = SubcircuitDefinition(
+            name="LINE_CELL",
+            components={
+                "PORT_001": port_1,
+                "PORT_002": port_2,
+                "TL_001": line,
+                "PRB_001": probe,
+            },
+            wires={
+                "W_P1": Wire("W_P1", "PORT_001", "node", "TL_001", "nk"),
+                "W_P2": Wire("W_P2", "TL_001", "nm", "PORT_002", "node"),
+                "W_PRB": Wire("W_PRB", "PRB_001", "sense", "TL_001", "nk"),
+            },
+            ports=[
+                SubcircuitPort("P1", "PORT_001", "node", "left"),
+                SubcircuitPort("P2", "PORT_002", "node", "right"),
+            ],
+        )
+        model.subcircuit_defs[subdef.name] = subdef
+        model.components["SUB_001"] = self._build_subcircuit_instance("SUB_001", "LineCell", subdef)
+
+        flat = SolverBuilder()._flatten_subcircuits(model)
+
+        flat_probe = flat.components["SUB_001__PRB_001"]
+        self.assertEqual(flat_probe.params["target_comp_id"], "SUB_001__TL_001")
+        self.assertEqual(flat_probe.params["line_name"], "SUB_001__TL1")
+
+    def test_nested_subcircuit_deep_param_override(self):
+        model = CircuitModel()
+        inner = self._build_pass_through_subdefinition("INNER")
+        outer = self._build_outer_subdefinition_with_inner(inner)
+        outer.exposed_params = {"INNER_INST.R_001.R": "R_outer"}
+        model.subcircuit_defs = {"INNER": inner, "OUTER": outer}
+        inst = self._build_subcircuit_instance("OUTER_INST", "Outer", outer)
+        inst.params["param_overrides"] = {"R_outer": 5.0}
+        model.components[inst.comp_id] = inst
+
+        flat = SolverBuilder()._flatten_subcircuits(model)
+
+        self.assertEqual(flat.components["OUTER_INST__INNER_INST__R_001"].params["R"], 5.0)
+
+    def test_nested_subcircuit_exposed_param_passthrough(self):
+        model = CircuitModel()
+        inner = self._build_pass_through_subdefinition("INNER")
+        inner.exposed_params = {"R_001.R": "R_inner"}
+        outer = self._build_outer_subdefinition_with_inner(inner)
+        outer.exposed_params = {"INNER_INST.R_inner": "R_outer"}
+        model.subcircuit_defs = {"INNER": inner, "OUTER": outer}
+        inst = self._build_subcircuit_instance("OUTER_INST", "Outer", outer)
+        inst.params["param_overrides"] = {"R_outer": 7.0}
+        model.components[inst.comp_id] = inst
+
+        flat = SolverBuilder()._flatten_subcircuits(model)
+
+        self.assertEqual(flat.components["OUTER_INST__INNER_INST__R_001"].params["R"], 7.0)
 
     def test_clear_removes_subcircuit_defs(self):
         model = CircuitModel()
@@ -1994,6 +2199,71 @@ class RegressionTests(unittest.TestCase):
             {"P1": 20, "P2": 10},
         )
 
+    def test_model_rejects_empty_subcircuit_name(self):
+        model = self._build_subcircuit_packaging_fixture()
+
+        with self.assertRaisesRegex(ValueError, "cannot be empty"):
+            model.create_subcircuit_from_selection(["R_001", "C_001"], "")
+
+    def test_model_rejects_duplicate_subcircuit_name(self):
+        model = self._build_subcircuit_packaging_fixture()
+        model.subcircuit_defs["FILTER"] = self._build_pass_through_subdefinition("FILTER")
+
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            model.create_subcircuit_from_selection(["R_001", "C_001"], "FILTER")
+
+    def test_subcircuit_ports_have_stable_order_by_position(self):
+        model = CircuitModel()
+        for comp in [
+            ComponentInstance(
+                comp_id="LEFT",
+                comp_type=ComponentType.RESISTOR,
+                name="Left",
+                x=-200,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            ),
+            ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=-40,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            ),
+            ComponentInstance(
+                comp_id="C_001",
+                comp_type=ComponentType.CAPACITOR,
+                name="C1",
+                x=40,
+                y=0,
+                pins=create_component_pins(ComponentType.CAPACITOR),
+            ),
+            ComponentInstance(
+                comp_id="RIGHT",
+                comp_type=ComponentType.RESISTOR,
+                name="Right",
+                x=200,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            ),
+        ]:
+            model.add_component(comp)
+
+        for wire in [
+            Wire("W_RIGHT", "C_001", "nt", "RIGHT", "nf"),
+            Wire("W_IN", "R_001", "nt", "C_001", "nf"),
+            Wire("W_LEFT", "LEFT", "nt", "R_001", "nf"),
+        ]:
+            model.add_wire(wire)
+        model._undo_stack.clear()
+        model._redo_stack.clear()
+
+        _sub_comp, subdef = model.create_subcircuit_from_selection(["R_001", "C_001"], "FILTER")
+
+        self.assertEqual([port.side for port in subdef.ports], ["left", "right"])
+        self.assertEqual([port.order for port in subdef.ports], [0, 1])
+
     def test_subcircuit_edit_mode_places_and_wires_inside_definition(self):
         get_app()
         port_type = getattr(ComponentType, "SUBCIRCUIT_PORT", None)
@@ -2033,6 +2303,84 @@ class RegressionTests(unittest.TestCase):
                 any(
                     wire.from_comp == new_id or wire.to_comp == new_id
                     for wire in model.wires.values()
+                )
+            )
+        finally:
+            canvas.close()
+
+    def test_create_nested_subcircuit_from_subcircuit_edit_container(self):
+        model = self._build_subcircuit_packaging_fixture()
+        model.create_subcircuit_from_selection(["R_001", "C_001"], "SUB_A")
+        sub_a = model.subcircuit_defs["SUB_A"]
+
+        result = model.create_subcircuit_from_design_selection(
+            components=sub_a.components,
+            wires=sub_a.wires,
+            comp_ids=["R_001", "C_001"],
+            name="SUB_B",
+        )
+
+        self.assertIsNotNone(result)
+        self.assertIn("SUB_B", model.subcircuit_defs)
+        self.assertNotIn("R_001", sub_a.components)
+        self.assertNotIn("C_001", sub_a.components)
+        self.assertTrue(
+            any(
+                comp.comp_type == ComponentType.SUBCIRCUIT
+                and comp.params.get("subcircuit_name") == "SUB_B"
+                for comp in sub_a.components.values()
+            )
+        )
+        self.assertFalse(
+            any(
+                comp.comp_type == ComponentType.SUBCIRCUIT
+                and comp.params.get("subcircuit_name") == "SUB_B"
+                for comp in model.components.values()
+            )
+        )
+
+    def test_rotate_component_inside_subcircuit_edit_mode(self):
+        get_app()
+        model = self._build_subcircuit_packaging_fixture()
+        model.create_subcircuit_from_selection(["R_001", "C_001"], "FILTER")
+        subdef = model.subcircuit_defs["FILTER"]
+        canvas = CircuitCanvas(model)
+        try:
+            canvas._enter_subcircuit("FILTER")
+            canvas.component_items["R_001"].setSelected(True)
+
+            canvas._rotate_selected()
+
+            self.assertEqual(subdef.components["R_001"].rotation, 90)
+            self.assertNotIn("R_001", model.components)
+        finally:
+            canvas.close()
+
+    def test_add_probe_inside_subcircuit_adds_probe_to_subdef_not_top_level(self):
+        get_app()
+        model = self._build_subcircuit_packaging_fixture()
+        model.create_subcircuit_from_selection(["R_001", "C_001"], "FILTER")
+        subdef = model.subcircuit_defs["FILTER"]
+        canvas = CircuitCanvas(model)
+        try:
+            canvas._enter_subcircuit("FILTER")
+            r_item = canvas.component_items["R_001"]
+
+            canvas._add_probe_at_pin(r_item, "branch_current", "nf")
+
+            probe_ids = [
+                comp_id for comp_id, comp in subdef.components.items()
+                if comp.comp_type == ComponentType.PROBE
+            ]
+            self.assertEqual(len(probe_ids), 1)
+            self.assertFalse(
+                any(comp.comp_type == ComponentType.PROBE for comp in model.components.values())
+            )
+            probe_id = probe_ids[0]
+            self.assertTrue(
+                any(
+                    wire.from_comp == probe_id and wire.to_comp == "R_001"
+                    for wire in subdef.wires.values()
                 )
             )
         finally:

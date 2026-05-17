@@ -1095,7 +1095,10 @@ class CircuitModel:
             self._notify("subcircuit_def_removed")
 
     def create_subcircuit_from_selection(
-        self, selected_comp_ids: List[str], name: str
+        self,
+        selected_comp_ids: List[str],
+        name: str,
+        overwrite: bool = False,
     ) -> Optional[Tuple['ComponentInstance', 'SubcircuitDefinition']]:
         """
         从选中的元件创建子电路。
@@ -1107,23 +1110,48 @@ class CircuitModel:
 
         返回: (子电路实例, 子电路定义) 或 None（如果失败）
         """
-        if len(selected_comp_ids) < 2:
+        return self.create_subcircuit_from_design_selection(
+            components=self.components,
+            wires=self.wires,
+            comp_ids=selected_comp_ids,
+            name=name,
+            overwrite=overwrite,
+        )
+
+    def create_subcircuit_from_design_selection(
+        self,
+        components: Dict[str, ComponentInstance],
+        wires: Dict[str, Wire],
+        comp_ids: List[str],
+        name: str,
+        overwrite: bool = False,
+    ) -> Optional[Tuple['ComponentInstance', 'SubcircuitDefinition']]:
+        """Create a subcircuit from a supplied design container."""
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Subcircuit name cannot be empty")
+        if name in self.subcircuit_defs and not overwrite:
+            raise ValueError(f"Subcircuit already exists: {name}")
+        if len(comp_ids) < 2:
             return None
 
-        selected_set = set(selected_comp_ids)
+        selected_set = set(comp_ids)
+        internal_comps = {
+            cid: components[cid]
+            for cid in comp_ids
+            if cid in components
+        }
 
-        # 1. 收集内部元件
-        internal_comps = {}
-        for cid in selected_comp_ids:
-            if cid in self.components:
-                internal_comps[cid] = self.components[cid]
+        node_model = CircuitModel()
+        node_model.components = components
+        node_model.wires = wires
+        node_model.subcircuit_defs = self.subcircuit_defs
+        node_map = node_model.assign_node_ids()
 
-        # 2. 收集连线：完全内部的 vs 连到外部的
-        node_map = self.assign_node_ids()
         internal_wires = {}
         boundary_groups: Dict[tuple, Dict[str, Any]] = {}
 
-        for wid, wire in list(self.wires.items()):
+        for wid, wire in list(wires.items()):
             from_in = wire.from_comp in selected_set
             to_in = wire.to_comp in selected_set
             if from_in and to_in:
@@ -1132,10 +1160,7 @@ class CircuitModel:
                 key = ("node", node_map.get((wire.from_comp, wire.from_pin)))
                 group = boundary_groups.setdefault(
                     key,
-                    {
-                        "internal_pins": set(),
-                        "connections": [],
-                    },
+                    {"internal_pins": set(), "connections": []},
                 )
                 group["internal_pins"].add((wire.from_comp, wire.from_pin))
                 group["connections"].append(
@@ -1145,10 +1170,7 @@ class CircuitModel:
                 key = ("node", node_map.get((wire.to_comp, wire.to_pin)))
                 group = boundary_groups.setdefault(
                     key,
-                    {
-                        "internal_pins": set(),
-                        "connections": [],
-                    },
+                    {"internal_pins": set(), "connections": []},
                 )
                 group["internal_pins"].add((wire.to_comp, wire.to_pin))
                 group["connections"].append(
@@ -1156,35 +1178,71 @@ class CircuitModel:
                 )
 
         for key, group in boundary_groups.items():
-            _kind, node_id = key
-            for comp_id in selected_comp_ids:
-                comp = self.components.get(comp_id)
+            node_id = key[1]
+            for comp_id in comp_ids:
+                comp = components.get(comp_id)
                 if comp is None:
                     continue
                 for pin in comp.pins:
                     if node_map.get((comp_id, pin.name)) == node_id:
                         group["internal_pins"].add((comp_id, pin.name))
 
-        # 3. 创建端口（每个边界电气节点生成一个内部端口节点）
-        ports = []
-        port_pins = []
-        for i, group in enumerate(boundary_groups.values()):
+        def pin_position(comp_id: str, pin_name: str) -> Tuple[float, float]:
+            comp = components.get(comp_id)
+            if comp is None:
+                return 0.0, 0.0
+            pin = comp.get_pin(pin_name)
+            if pin is None:
+                return float(comp.x), float(comp.y)
+            return float(comp.x + pin.local_x), float(comp.y + pin.local_y)
+
+        def centroid(points: List[Tuple[float, float]]) -> Tuple[float, float]:
+            if not points:
+                return 0.0, 0.0
+            return (
+                sum(point[0] for point in points) / len(points),
+                sum(point[1] for point in points) / len(points),
+            )
+
+        side_order = {"left": 0, "right": 1, "top": 2, "bottom": 3}
+        prepared_groups = []
+        for group in boundary_groups.values():
             if not group["internal_pins"]:
                 continue
-            int_comp, int_pin = sorted(group["internal_pins"])[0]
-            wid, _, _, ext_comp, ext_pin, _ = group["connections"][0]
-            int_c = self.components[int_comp]
-            ext_c = self.components.get(ext_comp)
-            if ext_c:
-                dx = ext_c.x - int_c.x
-                dy = ext_c.y - int_c.y
-                if abs(dx) >= abs(dy):
-                    side = "right" if dx > 0 else "left"
-                else:
-                    side = "bottom" if dy > 0 else "top"
+            internal_center = centroid([
+                pin_position(comp_id, pin_name)
+                for comp_id, pin_name in group["internal_pins"]
+            ])
+            external_points = [
+                pin_position(ext_comp, ext_pin)
+                for _wid, _int_comp, _int_pin, ext_comp, ext_pin, _was_from
+                in group["connections"]
+            ]
+            external_center = centroid(external_points) if external_points else internal_center
+            dx = external_center[0] - internal_center[0]
+            dy = external_center[1] - internal_center[1]
+            if abs(dx) >= abs(dy):
+                side = "right" if dx > 0 else "left"
             else:
-                side = "left"
+                side = "bottom" if dy > 0 else "top"
+            group["side"] = side
+            group["sort_coord"] = internal_center[1] if side in ("left", "right") else internal_center[0]
+            prepared_groups.append(group)
 
+        prepared_groups.sort(
+            key=lambda group: (
+                side_order.get(group["side"], 99),
+                group["sort_coord"],
+                sorted(group["internal_pins"]),
+            )
+        )
+
+        ports = []
+        port_pins = []
+        for i, group in enumerate(prepared_groups):
+            int_comp, _int_pin = sorted(group["internal_pins"])[0]
+            int_c = components[int_comp]
+            side = group["side"]
             port_name = f"P{i + 1}"
             port_comp_id = f"PORT_{i + 1:03d}"
             offset_x, offset_y = {
@@ -1220,14 +1278,12 @@ class CircuitModel:
                     to_comp=pin_comp,
                     to_pin=pin_name,
                 )
-            for wid, _, _, ext_comp, ext_pin, internal_was_from in group["connections"]:
+            for wid, _int_comp, _int_pin, ext_comp, ext_pin, internal_was_from in group["connections"]:
                 port_pins.append((wid, port_name, ext_comp, ext_pin, internal_was_from))
 
         if not ports:
-            # 没有外部连接 → 不需要子电路封装
             return None
 
-        # 4. 创建子电路定义
         subdef = SubcircuitDefinition(
             name=name,
             components=internal_comps,
@@ -1235,30 +1291,24 @@ class CircuitModel:
             ports=ports,
         )
 
-        # 5. 从画布移除原元件和连线
         self._save_undo_state()
 
-        # 移除外部连接线
         for wid, _port_name, _ext_comp, _ext_pin, _was_from in port_pins:
-            if wid in self.wires:
-                del self.wires[wid]
-
-        # 移除内部连线
+            if wid in wires:
+                del wires[wid]
         for wid in internal_wires:
-            if wid in self.wires:
-                del self.wires[wid]
+            if wid in wires:
+                del wires[wid]
+        for cid in comp_ids:
+            if cid in components:
+                del components[cid]
 
-        # 移除内部元件
-        for cid in selected_comp_ids:
-            if cid in self.components:
-                del self.components[cid]
-
-        # 6. 创建子电路实例
         pin_defs = subdef.get_port_pins()
-        pins = [Pin(name=p['name'], local_x=p['local_x'], local_y=p['local_y'])
-                for p in pin_defs]
+        pins = [
+            Pin(name=p['name'], local_x=p['local_x'], local_y=p['local_y'])
+            for p in pin_defs
+        ]
 
-        # 计算子电路的中心位置
         xs = [c.x for c in internal_comps.values()]
         ys = [c.y for c in internal_comps.values()]
         cx = sum(xs) // len(xs) if xs else 0
@@ -1275,13 +1325,11 @@ class CircuitModel:
             pins=pins,
         )
 
-        # 7. 添加子电路到模型
         self.subcircuit_defs[subdef.name] = subdef
-        self.components[sub_comp.comp_id] = sub_comp
+        components[sub_comp.comp_id] = sub_comp
         seen_external_connections = set()
 
-        # 8. 重新连接外部线（从外部元件连到子电路端口引脚）
-        for wid, port_name, ext_comp, ext_pin, internal_was_from in port_pins:
+        for _wid, port_name, ext_comp, ext_pin, internal_was_from in port_pins:
             if internal_was_from:
                 from_comp, from_pin = sub_comp.comp_id, port_name
                 to_comp, to_pin = ext_comp, ext_pin
@@ -1300,7 +1348,7 @@ class CircuitModel:
                 to_comp=to_comp,
                 to_pin=to_pin,
             )
-            self.wires[new_wire.wire_id] = new_wire
+            wires[new_wire.wire_id] = new_wire
 
         self._notify("component_added")
         return sub_comp, subdef

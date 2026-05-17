@@ -65,6 +65,135 @@ class SolverBuilder:
     #  子电路展平
     # ================================================================
 
+    def _prefixed_id(self, prefix: str, comp_id: str) -> str:
+        return f"{prefix}{comp_id}" if prefix else comp_id
+
+    def _rewrite_probe_params_after_prefix(
+        self,
+        probe_comp: ComponentInstance,
+        source_components: Dict[str, ComponentInstance],
+        prefix: str,
+    ) -> None:
+        """Keep flattened probe references aligned with prefixed component names."""
+        if probe_comp.comp_type != ComponentType.PROBE:
+            return
+
+        params = dict(probe_comp.params or {})
+        probe_type = params.get("probe_type")
+
+        if probe_type == "branch_current":
+            target_id = params.get("target_comp_id")
+            if target_id and target_id in source_components:
+                target_comp = source_components[target_id]
+                old_name = target_comp.name or target_id
+                params["target_comp_id"] = self._prefixed_id(prefix, target_id)
+                params["branch_name"] = self._prefixed_id(prefix, old_name)
+            elif params.get("branch_name"):
+                params["branch_name"] = self._prefixed_id(prefix, params["branch_name"])
+
+        elif probe_type == "line_current":
+            target_id = params.get("target_comp_id")
+            if target_id and target_id in source_components:
+                target_comp = source_components[target_id]
+                old_name = target_comp.name or target_id
+                params["target_comp_id"] = self._prefixed_id(prefix, target_id)
+                params["line_name"] = self._prefixed_id(prefix, old_name)
+            elif params.get("line_name"):
+                params["line_name"] = self._prefixed_id(prefix, params["line_name"])
+
+        probe_comp.params = params
+
+    def _build_local_param_overrides(
+        self,
+        subdef: SubcircuitDefinition,
+        instance: ComponentInstance,
+    ) -> Dict[str, object]:
+        result = {}
+        result.update(instance.params.get("_raw_param_overrides", {}) or {})
+
+        instance_overrides = instance.params.get("param_overrides", {}) or {}
+        exposed_params = getattr(subdef, "exposed_params", {}) or {}
+
+        for key, value in instance_overrides.items():
+            if "." in key:
+                result[key] = value
+
+        for internal_path, exposed_name in exposed_params.items():
+            if exposed_name in instance_overrides:
+                result[internal_path] = instance_overrides[exposed_name]
+
+        return result
+
+    def _apply_direct_param_overrides(
+        self,
+        comp: ComponentInstance,
+        local_overrides: Dict[str, object],
+    ) -> None:
+        prefix = f"{comp.comp_id}."
+        for path, value in local_overrides.items():
+            if not path.startswith(prefix):
+                continue
+            rest = path[len(prefix):]
+            if "." in rest:
+                continue
+            comp.params[rest] = value
+
+    def _extract_child_param_overrides(
+        self,
+        child_comp_id: str,
+        local_overrides: Dict[str, object],
+    ) -> tuple[Dict[str, object], Dict[str, object]]:
+        child_exposed_overrides = {}
+        child_raw_overrides = {}
+        prefix = f"{child_comp_id}."
+
+        for path, value in local_overrides.items():
+            if not path.startswith(prefix):
+                continue
+            child_path = path[len(prefix):]
+            if "." in child_path:
+                child_raw_overrides[child_path] = value
+            else:
+                child_exposed_overrides[child_path] = value
+
+        return child_exposed_overrides, child_raw_overrides
+
+    def _remap_legacy_numeric_probes_after_flatten(
+        self,
+        original_model: CircuitModel,
+        flat_model: CircuitModel,
+        top_pin_map: Dict[tuple, tuple],
+    ) -> None:
+        if not flat_model.probes:
+            return
+
+        import copy
+
+        original_snapshot = CircuitModel()
+        original_snapshot.components = copy.deepcopy(original_model.components)
+        original_snapshot.wires = copy.deepcopy(original_model.wires)
+        original_snapshot.subcircuit_defs = original_model.subcircuit_defs
+        original_node_map = original_snapshot.assign_node_ids()
+        flat_node_map = flat_model.assign_node_ids()
+
+        node_remap = {0: 0}
+        for original_pin, original_node in original_node_map.items():
+            flat_pin = top_pin_map.get(original_pin)
+            if flat_pin is None:
+                continue
+            flat_node = flat_node_map.get(flat_pin)
+            if flat_node is None:
+                continue
+            node_remap.setdefault(original_node, flat_node)
+
+        for probe in flat_model.probes:
+            if probe.probe_type != "voltage":
+                continue
+            if probe.node_pos is not None:
+                probe.node_pos = node_remap.get(probe.node_pos, probe.node_pos)
+            if probe.node_neg is not None:
+                probe.node_neg = node_remap.get(probe.node_neg, probe.node_neg)
+
     def _flatten_subcircuits(self, model: CircuitModel) -> CircuitModel:
         """
         将模型中的子电路展平为普通元件。
@@ -132,17 +261,6 @@ class SolverBuilder:
                 for a, b in zip(flat_pins, flat_pins[1:]):
                     add_flat_wire(a, b, prefix)
 
-        def apply_instance_overrides(new_comp, inner_comp, subdef, instance):
-            overrides = instance.params.get("param_overrides", {}) or {}
-            for key, value in overrides.items():
-                prefix = f"{inner_comp.comp_id}."
-                if key.startswith(prefix):
-                    new_comp.params[key[len(prefix):]] = value
-            for inner_key, public_name in getattr(subdef, "exposed_params", {}).items():
-                prefix = f"{inner_comp.comp_id}."
-                if inner_key.startswith(prefix) and public_name in overrides:
-                    new_comp.params[inner_key[len(prefix):]] = overrides[public_name]
-
         def subcircuit_def_for(instance):
             sub_name = instance.params.get("subcircuit_name", "")
             subdef = model.subcircuit_defs.get(sub_name)
@@ -164,13 +282,24 @@ class SolverBuilder:
             stack = stack + [sub_name]
             pin_map = {}
             port_map = {}
+            local_overrides = self._build_local_param_overrides(subdef, instance)
 
             for inner_comp in subdef.components.values():
                 if inner_comp.comp_type == ComponentType.SUBCIRCUIT:
-                    _nested_name, nested_def = subcircuit_def_for(inner_comp)
+                    nested_instance = copy.deepcopy(inner_comp)
+                    child_exposed, child_raw = self._extract_child_param_overrides(
+                        nested_instance.comp_id,
+                        local_overrides,
+                    )
+                    existing_overrides = nested_instance.params.get("param_overrides", {}) or {}
+                    merged_overrides = {**existing_overrides, **child_exposed}
+                    nested_instance.params["param_overrides"] = merged_overrides
+                    nested_instance.params["_raw_param_overrides"] = child_raw
+
+                    _nested_name, nested_def = subcircuit_def_for(nested_instance)
                     nested_prefix = f"{prefix}{inner_comp.comp_id}__"
                     nested_ports = instantiate_subcircuit(
-                        inner_comp,
+                        nested_instance,
                         nested_def,
                         nested_prefix,
                         stack,
@@ -182,9 +311,14 @@ class SolverBuilder:
                     continue
 
                 new_comp = copy.deepcopy(inner_comp)
+                self._apply_direct_param_overrides(new_comp, local_overrides)
                 new_comp.comp_id = prefix + inner_comp.comp_id
                 new_comp.name = prefix + inner_comp.name
-                apply_instance_overrides(new_comp, inner_comp, subdef, instance)
+                self._rewrite_probe_params_after_prefix(
+                    new_comp,
+                    subdef.components,
+                    prefix,
+                )
                 flat.components[new_comp.comp_id] = new_comp
                 for pin in new_comp.pins:
                     pin_map[(inner_comp.comp_id, pin.name)] = (new_comp.comp_id, pin.name)
@@ -223,6 +357,7 @@ class SolverBuilder:
             "top",
         )
 
+        self._remap_legacy_numeric_probes_after_flatten(model, flat, top_pin_map)
         flat._rebuild_id_counters()
         return flat
 
