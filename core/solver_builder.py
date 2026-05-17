@@ -36,6 +36,10 @@ class SolverBuilder:
 
         s = model.settings
 
+        validation = model.validate_all_subcircuits()
+        if validation.has_errors:
+            raise ValueError(model.format_validation_errors(validation))
+
         # 展平子电路：生成一个不含子电路的展平模型副本
         flat_model = self._flatten_subcircuits(model)
 
@@ -67,7 +71,6 @@ class SolverBuilder:
         递归展开：子电路内部元件用前缀重命名，端口引脚映射到外部节点。
         返回一个不含 SUBCIRCUIT 元件的新模型副本。
         """
-        import copy
 
         # 如果没有子电路实例，直接返回原模型
         has_subcircuit = any(
@@ -77,132 +80,148 @@ class SolverBuilder:
         if not has_subcircuit:
             return model
 
-        # 先做一次 assign_node_ids 获取子电路端口的外部节点映射
-        node_map = model.assign_node_ids()
+        return self._flatten_subcircuits_by_nodes(model)
 
-        # 创建展平后的模型
+    def _flatten_subcircuits_by_nodes(self, model: CircuitModel) -> CircuitModel:
+        """Flatten subcircuits recursively and preserve topology by node groups."""
+        import copy
+
         flat = CircuitModel()
         flat.settings = copy.deepcopy(model.settings)
         flat.probes = copy.deepcopy(model.probes)
         flat.subcircuit_defs = copy.deepcopy(model.subcircuit_defs)
+        wire_counter = 0
 
-        # 1. 添加所有非子电路元件
-        for comp in model.components.values():
-            if comp.comp_type != ComponentType.SUBCIRCUIT:
-                flat.components[comp.comp_id] = copy.deepcopy(comp)
+        def add_flat_wire(a, b, prefix):
+            nonlocal wire_counter
+            if a == b:
+                return
+            wire_counter += 1
+            wire_id = f"_flat_{prefix}_{wire_counter:06d}"
+            flat.wires[wire_id] = Wire(
+                wire_id=wire_id,
+                from_comp=a[0],
+                from_pin=a[1],
+                to_comp=b[0],
+                to_pin=b[1],
+            )
 
-        # 2. 添加子电路内部的元件（带前缀）和内部连线
-        for comp in model.components.values():
-            if comp.comp_type != ComponentType.SUBCIRCUIT:
-                continue
+        def node_groups_for(components, wires):
+            temp = CircuitModel()
+            temp.components = copy.deepcopy(components)
+            temp.wires = copy.deepcopy(wires)
+            temp.subcircuit_defs = model.subcircuit_defs
+            node_map = temp.assign_node_ids()
+            groups = {}
+            for comp in temp.components.values():
+                for pin in comp.pins:
+                    key = (comp.comp_id, pin.name)
+                    groups.setdefault(node_map[key], []).append(key)
+            return groups
 
-            sub_name = comp.params.get('subcircuit_name', '')
+        def connect_node_groups(groups, pin_map, prefix):
+            for pins in groups.values():
+                flat_pins = []
+                seen = set()
+                for pin_key in pins:
+                    flat_pin = pin_map.get(pin_key)
+                    if flat_pin is None or flat_pin in seen:
+                        continue
+                    seen.add(flat_pin)
+                    flat_pins.append(flat_pin)
+                for a, b in zip(flat_pins, flat_pins[1:]):
+                    add_flat_wire(a, b, prefix)
+
+        def apply_instance_overrides(new_comp, inner_comp, subdef, instance):
+            overrides = instance.params.get("param_overrides", {}) or {}
+            for key, value in overrides.items():
+                prefix = f"{inner_comp.comp_id}."
+                if key.startswith(prefix):
+                    new_comp.params[key[len(prefix):]] = value
+            for inner_key, public_name in getattr(subdef, "exposed_params", {}).items():
+                prefix = f"{inner_comp.comp_id}."
+                if inner_key.startswith(prefix) and public_name in overrides:
+                    new_comp.params[inner_key[len(prefix):]] = overrides[public_name]
+
+        def subcircuit_def_for(instance):
+            sub_name = instance.params.get("subcircuit_name", "")
             subdef = model.subcircuit_defs.get(sub_name)
             if subdef is None:
-                continue
+                raise ValueError(
+                    f"Subcircuit instance {instance.comp_id} references missing "
+                    f"definition: {sub_name}"
+                )
+            return sub_name, subdef
 
-            prefix = f"{comp.comp_id}__"  # 如 "SUB_001__"
+        def instantiate_subcircuit(instance, subdef, prefix, stack):
+            sub_name = instance.params.get("subcircuit_name", subdef.name)
+            if sub_name in stack:
+                cycle = stack[stack.index(sub_name):] + [sub_name]
+                raise ValueError(
+                    "Detected circular subcircuit reference: "
+                    + " -> ".join(cycle)
+                )
+            stack = stack + [sub_name]
+            pin_map = {}
+            port_map = {}
 
-            # 添加内部元件（重命名 comp_id）
-            id_remap = {}  # old_id -> new_id
             for inner_comp in subdef.components.values():
-                new_id = prefix + inner_comp.comp_id
-                id_remap[inner_comp.comp_id] = new_id
+                if inner_comp.comp_type == ComponentType.SUBCIRCUIT:
+                    _nested_name, nested_def = subcircuit_def_for(inner_comp)
+                    nested_prefix = f"{prefix}{inner_comp.comp_id}__"
+                    nested_ports = instantiate_subcircuit(
+                        inner_comp,
+                        nested_def,
+                        nested_prefix,
+                        stack,
+                    )
+                    for pin in inner_comp.pins:
+                        mapped = nested_ports.get(pin.name)
+                        if mapped is not None:
+                            pin_map[(inner_comp.comp_id, pin.name)] = mapped
+                    continue
+
                 new_comp = copy.deepcopy(inner_comp)
-                new_comp.comp_id = new_id
+                new_comp.comp_id = prefix + inner_comp.comp_id
                 new_comp.name = prefix + inner_comp.name
-                flat.components[new_id] = new_comp
+                apply_instance_overrides(new_comp, inner_comp, subdef, instance)
+                flat.components[new_comp.comp_id] = new_comp
+                for pin in new_comp.pins:
+                    pin_map[(inner_comp.comp_id, pin.name)] = (new_comp.comp_id, pin.name)
 
-            # 添加内部连线
-            for wire in subdef.wires.values():
-                new_from = id_remap.get(wire.from_comp, wire.from_comp)
-                new_to = id_remap.get(wire.to_comp, wire.to_comp)
-                flat_w = copy.deepcopy(wire)
-                flat_w.wire_id = prefix + wire.wire_id
-                flat_w.from_comp = new_from
-                flat_w.to_comp = new_to
-                flat.wires[flat_w.wire_id] = flat_w
+            connect_node_groups(
+                node_groups_for(subdef.components, subdef.wires),
+                pin_map,
+                prefix.rstrip("_"),
+            )
 
-            # 3. 连接端口：子电路端口引脚的外部节点 → 内部引脚
-            # 子电路端口引脚在外部连线上，node_map 已经映射了
             for port in subdef.ports:
-                # 获取子电路端口引脚对应的外部节点
-                port_pin_key = (comp.comp_id, port.port_name)
-                ext_node = node_map.get(port_pin_key, 0)
+                mapped = pin_map.get((port.internal_comp_id, port.internal_pin_name))
+                if mapped is not None:
+                    port_map[port.port_name] = mapped
+            return port_map
 
-                # 获取内部元件引脚
-                inner_comp_id = id_remap.get(port.internal_comp_id)
-                if inner_comp_id is None:
-                    continue
-
-                # 找到外部连线连接到端口引脚的线，将这些线的另一端
-                # 连到内部元件引脚
-                # 方法：直接修改 flat 的节点分配，让内部引脚的 node_id = ext_node
-                # 这通过在 flat 中添加虚拟连线实现
-                inner_comp = flat.components.get(inner_comp_id)
-                if inner_comp is None:
-                    continue
-
-                # 在内部引脚和外部节点之间创建虚拟连线
-                # 使用一个虚拟元件来表示外部连接
-                if ext_node == 0:
-                    # 连接到 GND
-                    gnd_id = f"_sub_gnd_{prefix}{port.port_name}"
-                    from models.component_lib import create_component_pins, get_default_params
-                    from models.circuit_model import Pin
-                    gnd_comp = ComponentInstance(
-                        comp_id=gnd_id,
-                        comp_type=ComponentType.GROUND,
-                        name="GND",
-                        x=0, y=0, rotation=0,
-                        params=get_default_params(ComponentType.GROUND),
-                        pins=create_component_pins(ComponentType.GROUND),
-                    )
-                    flat.components[gnd_id] = gnd_comp
-
-                    gnd_wire_id = f"_sub_gnd_w_{prefix}{port.port_name}"
-                    flat.wires[gnd_wire_id] = Wire(
-                        wire_id=gnd_wire_id,
-                        from_comp=inner_comp_id,
-                        from_pin=port.internal_pin_name,
-                        to_comp=gnd_id,
-                        to_pin='gnd',
-                    )
-                else:
-                    # 非地节点：找到外部连到该节点的其他元件引脚，直接连线
-                    for wire in model.wires.values():
-                        other_comp = None
-                        other_pin = None
-                        if (wire.from_comp == comp.comp_id
-                                and wire.from_pin == port.port_name):
-                            other_comp = wire.to_comp
-                            other_pin = wire.to_pin
-                        elif (wire.to_comp == comp.comp_id
-                              and wire.to_pin == port.port_name):
-                            other_comp = wire.from_comp
-                            other_pin = wire.from_pin
-
-                        if other_comp and other_comp in flat.components:
-                            bridge_id = f"_sub_br_{prefix}{port.port_name}_{other_comp}"
-                            flat.wires[bridge_id] = Wire(
-                                wire_id=bridge_id,
-                                from_comp=inner_comp_id,
-                                from_pin=port.internal_pin_name,
-                                to_comp=other_comp,
-                                to_pin=other_pin,
-                            )
-
-        # 4. 添加非子电路相关的原始连线
-        for wire in model.wires.values():
-            # 跳过涉及子电路的连线（已经通过端口桥接处理）
-            if wire.from_comp in model.components and \
-               model.components[wire.from_comp].comp_type == ComponentType.SUBCIRCUIT:
+        top_pin_map = {}
+        for comp in model.components.values():
+            if comp.comp_type == ComponentType.SUBCIRCUIT:
+                _sub_name, subdef = subcircuit_def_for(comp)
+                port_map = instantiate_subcircuit(comp, subdef, f"{comp.comp_id}__", [])
+                for pin in comp.pins:
+                    mapped = port_map.get(pin.name)
+                    if mapped is not None:
+                        top_pin_map[(comp.comp_id, pin.name)] = mapped
                 continue
-            if wire.to_comp in model.components and \
-               model.components[wire.to_comp].comp_type == ComponentType.SUBCIRCUIT:
-                continue
-            if wire.wire_id not in flat.wires:
-                flat.wires[wire.wire_id] = copy.deepcopy(wire)
+
+            new_comp = copy.deepcopy(comp)
+            flat.components[new_comp.comp_id] = new_comp
+            for pin in new_comp.pins:
+                top_pin_map[(comp.comp_id, pin.name)] = (new_comp.comp_id, pin.name)
+
+        connect_node_groups(
+            node_groups_for(model.components, model.wires),
+            top_pin_map,
+            "top",
+        )
 
         flat._rebuild_id_counters()
         return flat

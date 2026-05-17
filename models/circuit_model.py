@@ -141,12 +141,35 @@ class Wire:
 
 
 @dataclass
+class ValidationIssue:
+    level: str
+    code: str
+    message: str
+    location: str = ""
+
+
+@dataclass
+class ValidationResult:
+    issues: List[ValidationIssue] = field(default_factory=list)
+
+    @property
+    def has_errors(self) -> bool:
+        return any(issue.level == "error" for issue in self.issues)
+
+    @property
+    def has_warnings(self) -> bool:
+        return any(issue.level == "warning" for issue in self.issues)
+
+
+@dataclass
 class SubcircuitPort:
     """子电路暴露的端口 — 连接内部引脚与外部世界"""
     port_name: str              # 外部端口名，如 "P1", "P2"
     internal_comp_id: str       # 内部元件 comp_id
     internal_pin_name: str      # 内部引脚名
     side: str = "left"          # 端口在盒子上的位置: left / right / top / bottom
+    order: int = 0
+    description: str = ""
 
     def to_dict(self) -> Dict:
         return {
@@ -154,15 +177,19 @@ class SubcircuitPort:
             'internal_comp_id': self.internal_comp_id,
             'internal_pin_name': self.internal_pin_name,
             'side': self.side,
+            'order': self.order,
+            'description': self.description,
         }
 
     @classmethod
-    def from_dict(cls, data: Dict) -> 'SubcircuitPort':
+    def from_dict(cls, data: Dict, index: int = 0) -> 'SubcircuitPort':
         return cls(
             port_name=data.get('port_name', ''),
             internal_comp_id=data.get('internal_comp_id', ''),
             internal_pin_name=data.get('internal_pin_name', ''),
             side=data.get('side', 'left'),
+            order=data.get('order', index),
+            description=data.get('description', ''),
         )
 
 
@@ -173,6 +200,7 @@ class SubcircuitDefinition:
     components: Dict[str, ComponentInstance] = field(default_factory=dict)
     wires: Dict[str, Wire] = field(default_factory=dict)
     ports: List[SubcircuitPort] = field(default_factory=list)
+    exposed_params: Dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
         return {
@@ -180,6 +208,7 @@ class SubcircuitDefinition:
             'components': {k: v.to_dict() for k, v in self.components.items()},
             'wires': {k: v.to_dict() for k, v in self.wires.items()},
             'ports': [p.to_dict() for p in self.ports],
+            'exposed_params': self.exposed_params,
         }
 
     @classmethod
@@ -194,16 +223,30 @@ class SubcircuitDefinition:
                 k: Wire.from_dict(v)
                 for k, v in data.get('wires', {}).items()
             },
-            ports=[SubcircuitPort.from_dict(p) for p in data.get('ports', [])],
+            ports=[
+                SubcircuitPort.from_dict(p, index=i)
+                for i, p in enumerate(data.get('ports', []))
+            ],
+            exposed_params=data.get('exposed_params', {}),
         )
 
     def get_port_pins(self) -> List[Dict]:
         """生成子电路实例的引脚定义列表（基于端口）"""
         # 根据端口数量和 side 自动分配 local_x/local_y
-        left_ports = [p for p in self.ports if p.side == 'left']
-        right_ports = [p for p in self.ports if p.side == 'right']
-        top_ports = [p for p in self.ports if p.side == 'top']
-        bottom_ports = [p for p in self.ports if p.side == 'bottom']
+        side_order = {
+            "left": 0,
+            "right": 1,
+            "top": 2,
+            "bottom": 3,
+        }
+        ports = sorted(
+            self.ports,
+            key=lambda p: (side_order.get(p.side, 99), p.order, p.port_name),
+        )
+        left_ports = [p for p in ports if p.side == 'left']
+        right_ports = [p for p in ports if p.side == 'right']
+        top_ports = [p for p in ports if p.side == 'top']
+        bottom_ports = [p for p in ports if p.side == 'bottom']
 
         pin_defs = []
         # 左侧引脚
@@ -452,19 +495,48 @@ class CircuitModel:
     def _rebuild_id_counters(self):
         """根据现有元件重新构建 ID 计数器"""
         self._id_counters = {}
-        for comp in self.components.values():
+        for comp in self.iter_all_components():
             self._sync_counter_for_component(comp)
+        for wire in self.iter_all_wires():
+            self._sync_counter_for_object_id(wire.wire_id)
 
     def _sync_counter_for_component(self, comp: ComponentInstance):
         """把一个元件实例的编号信息同步到计数器"""
-        type_str = comp.comp_type.value
-        suffix = comp.comp_id.rsplit('_', 1)[-1]
+        self._sync_counter_for_object_id(comp.comp_id, comp.comp_type.value)
+
+    def _sync_counter_for_object_id(self, object_id: str, expected_prefix: Optional[str] = None):
+        prefix, number = self._parse_id(object_id)
+        if prefix is None:
+            return
+        if expected_prefix is not None:
+            prefix = expected_prefix
+        self._id_counters[prefix] = max(
+            self._id_counters.get(prefix, 0),
+            number,
+        )
+
+    @staticmethod
+    def _parse_id(object_id: str) -> Tuple[Optional[str], Optional[int]]:
+        if not object_id or "_" not in object_id:
+            return None, None
+        prefix, suffix = object_id.rsplit('_', 1)
         if suffix.isdigit():
-            number = int(suffix)
-            self._id_counters[type_str] = max(
-                self._id_counters.get(type_str, 0),
-                number,
-            )
+            return prefix, int(suffix)
+        return None, None
+
+    def iter_all_components(self):
+        for comp in self.components.values():
+            yield comp
+        for subdef in self.subcircuit_defs.values():
+            for comp in subdef.components.values():
+                yield comp
+
+    def iter_all_wires(self):
+        for wire in self.wires.values():
+            yield wire
+        for subdef in self.subcircuit_defs.values():
+            for wire in subdef.wires.values():
+                yield wire
 
     # ---- Undo/Redo ----
 
@@ -686,6 +758,329 @@ class CircuitModel:
 
         return probes
 
+    def _pin_names(self, comp: ComponentInstance) -> set:
+        return {pin.name for pin in comp.pins}
+
+    def _issue(
+        self,
+        level: str,
+        code: str,
+        message: str,
+        location: str = "",
+    ) -> ValidationIssue:
+        return ValidationIssue(level=level, code=code, message=message, location=location)
+
+    def format_validation_errors(self, validation: ValidationResult) -> str:
+        return "\n".join(
+            f"[{issue.level}] {issue.code}: {issue.message}"
+            for issue in validation.issues
+        )
+
+    def validate_subcircuit_definition(self, subdef_name: str) -> ValidationResult:
+        issues: List[ValidationIssue] = []
+        subdef = self.subcircuit_defs.get(subdef_name)
+        if subdef is None:
+            return ValidationResult([
+                self._issue(
+                    "error",
+                    "subcircuit_definition_not_found",
+                    f"Subcircuit definition not found: {subdef_name}",
+                    subdef_name,
+                )
+            ])
+
+        if not subdef.components:
+            issues.append(self._issue(
+                "warning",
+                "empty_subcircuit",
+                f"Subcircuit {subdef_name} has no internal components.",
+                subdef_name,
+            ))
+        elif not any(
+            comp.comp_type != ComponentType.SUBCIRCUIT_PORT
+            for comp in subdef.components.values()
+        ):
+            issues.append(self._issue(
+                "warning",
+                "subcircuit_has_only_ports",
+                f"Subcircuit {subdef_name} contains only ports.",
+                subdef_name,
+            ))
+
+        seen_ports = set()
+        duplicate_ports = set()
+        for port in subdef.ports:
+            if port.port_name in seen_ports:
+                duplicate_ports.add(port.port_name)
+            seen_ports.add(port.port_name)
+        for port_name in sorted(duplicate_ports):
+            issues.append(self._issue(
+                "error",
+                "duplicate_port_name",
+                f"Subcircuit {subdef_name} has duplicate port name: {port_name}",
+                subdef_name,
+            ))
+
+        for port in subdef.ports:
+            comp = subdef.components.get(port.internal_comp_id)
+            location = f"{subdef_name}.{port.port_name}"
+            if comp is None:
+                issues.append(self._issue(
+                    "error",
+                    "port_missing_component",
+                    f"Port {port.port_name} references missing component {port.internal_comp_id}.",
+                    location,
+                ))
+                continue
+            if port.internal_pin_name not in self._pin_names(comp):
+                issues.append(self._issue(
+                    "error",
+                    "port_missing_pin",
+                    f"Port {port.port_name} references missing pin {port.internal_pin_name}.",
+                    location,
+                ))
+            if comp.comp_type == ComponentType.SUBCIRCUIT_PORT:
+                connected = any(
+                    wire.from_comp == comp.comp_id or wire.to_comp == comp.comp_id
+                    for wire in subdef.wires.values()
+                )
+                if not connected:
+                    issues.append(self._issue(
+                        "warning",
+                        "floating_internal_port",
+                        f"Port {port.port_name} internal port {comp.comp_id} is not wired.",
+                        location,
+                    ))
+
+        for wire in subdef.wires.values():
+            from_comp = subdef.components.get(wire.from_comp)
+            to_comp = subdef.components.get(wire.to_comp)
+            location = f"{subdef_name}.{wire.wire_id}"
+            if from_comp is None:
+                issues.append(self._issue(
+                    "error",
+                    "wire_missing_component",
+                    f"Wire {wire.wire_id} references missing component {wire.from_comp}.",
+                    location,
+                ))
+            elif wire.from_pin not in self._pin_names(from_comp):
+                issues.append(self._issue(
+                    "error",
+                    "wire_missing_pin",
+                    f"Wire {wire.wire_id} references missing pin {wire.from_comp}.{wire.from_pin}.",
+                    location,
+                ))
+            if to_comp is None:
+                issues.append(self._issue(
+                    "error",
+                    "wire_missing_component",
+                    f"Wire {wire.wire_id} references missing component {wire.to_comp}.",
+                    location,
+                ))
+            elif wire.to_pin not in self._pin_names(to_comp):
+                issues.append(self._issue(
+                    "error",
+                    "wire_missing_pin",
+                    f"Wire {wire.wire_id} references missing pin {wire.to_comp}.{wire.to_pin}.",
+                    location,
+                ))
+
+        return ValidationResult(issues)
+
+    def iter_subcircuit_instances(self, subdef_name: Optional[str] = None):
+        for comp in self.components.values():
+            if comp.comp_type == ComponentType.SUBCIRCUIT:
+                if subdef_name is None or comp.params.get("subcircuit_name") == subdef_name:
+                    yield self.components, self.wires, comp
+
+        for parent_subdef in self.subcircuit_defs.values():
+            for comp in parent_subdef.components.values():
+                if comp.comp_type == ComponentType.SUBCIRCUIT:
+                    if subdef_name is None or comp.params.get("subcircuit_name") == subdef_name:
+                        yield parent_subdef.components, parent_subdef.wires, comp
+
+    def validate_subcircuit_instances(self) -> ValidationResult:
+        issues: List[ValidationIssue] = []
+        for _components, wires, instance in self.iter_subcircuit_instances():
+            sub_name = instance.params.get("subcircuit_name", "")
+            location = instance.comp_id
+            if not sub_name:
+                issues.append(self._issue(
+                    "error",
+                    "instance_missing_subcircuit_name",
+                    f"Subcircuit instance {instance.comp_id} has no subcircuit_name.",
+                    location,
+                ))
+                continue
+            subdef = self.subcircuit_defs.get(sub_name)
+            if subdef is None:
+                issues.append(self._issue(
+                    "error",
+                    "instance_missing_definition",
+                    f"Subcircuit instance {instance.comp_id} references missing definition {sub_name}.",
+                    location,
+                ))
+                continue
+
+            expected = [pin["name"] for pin in subdef.get_port_pins()]
+            actual = [pin.name for pin in instance.pins]
+            if set(expected) != set(actual):
+                issues.append(self._issue(
+                    "error",
+                    "instance_ports_mismatch",
+                    f"{instance.comp_id} ports do not match definition {sub_name}.",
+                    location,
+                ))
+            elif expected != actual:
+                issues.append(self._issue(
+                    "warning",
+                    "instance_ports_order_mismatch",
+                    f"{instance.comp_id} port order differs from definition {sub_name}.",
+                    location,
+                ))
+
+            pin_names = {pin.name for pin in instance.pins}
+            for wire in wires.values():
+                if wire.from_comp == instance.comp_id and wire.from_pin not in pin_names:
+                    issues.append(self._issue(
+                        "error",
+                        "wire_missing_instance_port",
+                        f"Wire {wire.wire_id} references missing port {instance.comp_id}.{wire.from_pin}.",
+                        f"{location}.{wire.wire_id}",
+                    ))
+                if wire.to_comp == instance.comp_id and wire.to_pin not in pin_names:
+                    issues.append(self._issue(
+                        "error",
+                        "wire_missing_instance_port",
+                        f"Wire {wire.wire_id} references missing port {instance.comp_id}.{wire.to_pin}.",
+                        f"{location}.{wire.wire_id}",
+                    ))
+        return ValidationResult(issues)
+
+    def validate_subcircuit_cycles(self) -> ValidationResult:
+        issues: List[ValidationIssue] = []
+        reported = set()
+
+        def visit(name: str, stack: List[str]):
+            if name in stack:
+                cycle = stack[stack.index(name):] + [name]
+                cycle_text = " -> ".join(cycle)
+                if cycle_text not in reported:
+                    reported.add(cycle_text)
+                    issues.append(self._issue(
+                        "error",
+                        "subcircuit_cycle",
+                        f"Detected circular subcircuit reference: {cycle_text}",
+                        name,
+                    ))
+                return
+            subdef = self.subcircuit_defs.get(name)
+            if subdef is None:
+                return
+            next_stack = stack + [name]
+            for comp in subdef.components.values():
+                if comp.comp_type == ComponentType.SUBCIRCUIT:
+                    child_name = comp.params.get("subcircuit_name", "")
+                    if child_name:
+                        visit(child_name, next_stack)
+
+        for name in self.subcircuit_defs:
+            visit(name, [])
+        return ValidationResult(issues)
+
+    def validate_all_subcircuits(self) -> ValidationResult:
+        issues: List[ValidationIssue] = []
+        for name in self.subcircuit_defs:
+            issues.extend(self.validate_subcircuit_definition(name).issues)
+        issues.extend(self.validate_subcircuit_instances().issues)
+        issues.extend(self.validate_subcircuit_cycles().issues)
+        return ValidationResult(issues)
+
+    def _subcircuit_def_or_raise(self, subdef_name: str) -> SubcircuitDefinition:
+        subdef = self.subcircuit_defs.get(subdef_name)
+        if subdef is None:
+            raise ValueError(f"Subcircuit definition not found: {subdef_name}")
+        return subdef
+
+    def _find_subcircuit_port(self, subdef_name: str, port_name: str) -> SubcircuitPort:
+        subdef = self._subcircuit_def_or_raise(subdef_name)
+        for port in subdef.ports:
+            if port.port_name == port_name:
+                return port
+        raise ValueError(f"Subcircuit port not found: {subdef_name}.{port_name}")
+
+    def sync_subcircuit_instance_pins(self, subdef_name: str) -> None:
+        subdef = self._subcircuit_def_or_raise(subdef_name)
+        pin_template = subdef.get_port_pins()
+        for _components, _wires, instance in self.iter_subcircuit_instances(subdef_name):
+            old_node_ids = {pin.name: pin.node_id for pin in instance.pins}
+            instance.pins = [
+                Pin(
+                    name=pin["name"],
+                    local_x=pin["local_x"],
+                    local_y=pin["local_y"],
+                    node_id=old_node_ids.get(pin["name"]),
+                )
+                for pin in pin_template
+            ]
+
+    def rename_subcircuit_port(self, subdef_name: str, old_name: str, new_name: str) -> None:
+        new_name = new_name.strip()
+        if not new_name:
+            raise ValueError("Subcircuit port name cannot be empty")
+        subdef = self._subcircuit_def_or_raise(subdef_name)
+        if any(port.port_name == new_name and port.port_name != old_name for port in subdef.ports):
+            raise ValueError(f"Subcircuit port already exists: {new_name}")
+        port = self._find_subcircuit_port(subdef_name, old_name)
+
+        self._save_undo_state()
+        port.port_name = new_name
+        port_comp = subdef.components.get(port.internal_comp_id)
+        if port_comp is not None and port_comp.comp_type == ComponentType.SUBCIRCUIT_PORT:
+            port_comp.name = new_name
+            port_comp.params["port_name"] = new_name
+
+        for _components, wires, instance in self.iter_subcircuit_instances(subdef_name):
+            for pin in instance.pins:
+                if pin.name == old_name:
+                    pin.name = new_name
+            for wire in wires.values():
+                if wire.from_comp == instance.comp_id and wire.from_pin == old_name:
+                    wire.from_pin = new_name
+                if wire.to_comp == instance.comp_id and wire.to_pin == old_name:
+                    wire.to_pin = new_name
+
+        self.sync_subcircuit_instance_pins(subdef_name)
+        self._notify("subcircuit_ports_updated")
+
+    def update_subcircuit_port_side(self, subdef_name: str, port_name: str, side: str) -> None:
+        valid_sides = {"left", "right", "top", "bottom"}
+        if side not in valid_sides:
+            raise ValueError(f"Invalid subcircuit port side: {side}")
+        port = self._find_subcircuit_port(subdef_name, port_name)
+        self._save_undo_state()
+        port.side = side
+        self.sync_subcircuit_instance_pins(subdef_name)
+        self._notify("subcircuit_ports_updated")
+
+    def update_subcircuit_port_order(self, subdef_name: str, port_name: str, order: int) -> None:
+        port = self._find_subcircuit_port(subdef_name, port_name)
+        self._save_undo_state()
+        port.order = int(order)
+        self.sync_subcircuit_instance_pins(subdef_name)
+        self._notify("subcircuit_ports_updated")
+
+    def update_subcircuit_port_description(
+        self,
+        subdef_name: str,
+        port_name: str,
+        description: str,
+    ) -> None:
+        port = self._find_subcircuit_port(subdef_name, port_name)
+        self._save_undo_state()
+        port.description = description
+        self._notify("subcircuit_ports_updated")
+
     # ---- 子电路操作 ----
 
     def add_subcircuit_def(self, subdef: SubcircuitDefinition) -> None:
@@ -735,32 +1130,48 @@ class CircuitModel:
                 internal_wires[wid] = wire
             elif from_in and not to_in:
                 key = ("node", node_map.get((wire.from_comp, wire.from_pin)))
-                boundary_groups.setdefault(
+                group = boundary_groups.setdefault(
                     key,
                     {
-                        "representative": (wire.from_comp, wire.from_pin),
+                        "internal_pins": set(),
                         "connections": [],
                     },
-                )["connections"].append(
+                )
+                group["internal_pins"].add((wire.from_comp, wire.from_pin))
+                group["connections"].append(
                     (wid, wire.from_comp, wire.from_pin, wire.to_comp, wire.to_pin, True)
                 )
             elif not from_in and to_in:
                 key = ("node", node_map.get((wire.to_comp, wire.to_pin)))
-                boundary_groups.setdefault(
+                group = boundary_groups.setdefault(
                     key,
                     {
-                        "representative": (wire.to_comp, wire.to_pin),
+                        "internal_pins": set(),
                         "connections": [],
                     },
-                )["connections"].append(
+                )
+                group["internal_pins"].add((wire.to_comp, wire.to_pin))
+                group["connections"].append(
                     (wid, wire.to_comp, wire.to_pin, wire.from_comp, wire.from_pin, False)
                 )
+
+        for key, group in boundary_groups.items():
+            _kind, node_id = key
+            for comp_id in selected_comp_ids:
+                comp = self.components.get(comp_id)
+                if comp is None:
+                    continue
+                for pin in comp.pins:
+                    if node_map.get((comp_id, pin.name)) == node_id:
+                        group["internal_pins"].add((comp_id, pin.name))
 
         # 3. 创建端口（每个边界电气节点生成一个内部端口节点）
         ports = []
         port_pins = []
         for i, group in enumerate(boundary_groups.values()):
-            int_comp, int_pin = group["representative"]
+            if not group["internal_pins"]:
+                continue
+            int_comp, int_pin = sorted(group["internal_pins"])[0]
             wid, _, _, ext_comp, ext_pin, _ = group["connections"][0]
             int_c = self.components[int_comp]
             ext_c = self.components.get(ext_comp)
@@ -798,14 +1209,17 @@ class CircuitModel:
                 internal_comp_id=port_comp_id,
                 internal_pin_name="node",
                 side=side,
+                order=i,
             ))
-            internal_wires[f"W_{port_comp_id}"] = Wire(
-                wire_id=f"W_{port_comp_id}",
-                from_comp=port_comp_id,
-                from_pin="node",
-                to_comp=int_comp,
-                to_pin=int_pin,
-            )
+            for j, (pin_comp, pin_name) in enumerate(sorted(group["internal_pins"]), start=1):
+                wire_id = f"W_{port_comp_id}_{j:03d}"
+                internal_wires[wire_id] = Wire(
+                    wire_id=wire_id,
+                    from_comp=port_comp_id,
+                    from_pin="node",
+                    to_comp=pin_comp,
+                    to_pin=pin_name,
+                )
             for wid, _, _, ext_comp, ext_pin, internal_was_from in group["connections"]:
                 port_pins.append((wid, port_name, ext_comp, ext_pin, internal_was_from))
 
@@ -864,6 +1278,7 @@ class CircuitModel:
         # 7. 添加子电路到模型
         self.subcircuit_defs[subdef.name] = subdef
         self.components[sub_comp.comp_id] = sub_comp
+        seen_external_connections = set()
 
         # 8. 重新连接外部线（从外部元件连到子电路端口引脚）
         for wid, port_name, ext_comp, ext_pin, internal_was_from in port_pins:
@@ -873,6 +1288,11 @@ class CircuitModel:
             else:
                 from_comp, from_pin = ext_comp, ext_pin
                 to_comp, to_pin = sub_comp.comp_id, port_name
+            key = (from_comp, from_pin, to_comp, to_pin)
+            reverse_key = (to_comp, to_pin, from_comp, from_pin)
+            if key in seen_external_connections or reverse_key in seen_external_connections:
+                continue
+            seen_external_connections.add(key)
             new_wire = Wire(
                 wire_id=f"W_{uuid.uuid4().hex[:8]}",
                 from_comp=from_comp,
@@ -1005,6 +1425,8 @@ class CircuitModel:
         self.components.clear()
         self.wires.clear()
         self.probes.clear()
+        self.subcircuit_defs.clear()
+        self._selected_ids.clear()
         self._id_counters.clear()
         self._next_node_id = 1
         self._notify("cleared")

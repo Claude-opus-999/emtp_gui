@@ -1,4 +1,4 @@
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QBrush, QFont, QPen
 
 
@@ -27,12 +27,28 @@ def no_brush() -> QBrush:
     return QBrush(Qt.BrushStyle.NoBrush)
 
 
-def draw_text(painter, text: str, x: float, y: float, size: int = 9, color=MUTED):
+def draw_text(
+    painter,
+    text: str,
+    x,
+    y=None,
+    size: int = 9,
+    color=MUTED,
+    bold: bool = False,
+    alignment=Qt.AlignmentFlag.AlignCenter,
+):
     old_pen = painter.pen()
     old_font = painter.font()
+    font = QFont("Arial", size)
+    font.setBold(bold)
     painter.setPen(QPen(color, 1))
-    painter.setFont(QFont("Arial", size))
-    painter.drawText(QPointF(x, y), str(text))
+    painter.setFont(font)
+    if isinstance(x, QRectF):
+        painter.drawText(x, alignment, str(text))
+    else:
+        if y is None:
+            raise TypeError("draw_text() missing y coordinate")
+        painter.drawText(QPointF(float(x), float(y)), str(text))
     painter.setPen(old_pen)
     painter.setFont(old_font)
 

@@ -2118,6 +2118,12 @@ class MainWindow(QMainWindow):
 
             self.current_file = file_path
             self.setWindowTitle(f"EMTP Circuit Designer - {file_path}")
+            if validation.has_errors:
+                QMessageBox.warning(
+                    self,
+                    "Subcircuit Validation",
+                    "当前工程存在子电路错误，文件已保存，但可能无法仿真。",
+                )
             self.status_label.setText(f"已加载: {file_path}")
 
         except Exception as e:
@@ -2140,6 +2146,7 @@ class MainWindow(QMainWindow):
 
     def _save_to_file(self, file_path: str):
         try:
+            validation = self.model.validate_all_subcircuits()
             save_project(self.model, file_path)
             self.current_file = file_path
             self.setWindowTitle(f"EMTP Circuit Designer - {file_path}")

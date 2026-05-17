@@ -2122,6 +2122,9 @@ class CircuitCanvas(QGraphicsView):
             selected_comps = [item for item in self.scene.selectedItems()
                               if isinstance(item, ComponentGraphicsItem)]
             subcircuit_act.setEnabled(len(selected_comps) >= 2)
+            manage_ports_act = None
+            if item.component.comp_type == ComponentType.SUBCIRCUIT:
+                manage_ports_act = menu.addAction("Manage Ports")
             menu.addSeparator()
             prop_act = menu.addAction("属性")
 
@@ -2140,6 +2143,9 @@ class CircuitCanvas(QGraphicsView):
                 self._add_probe_at_pin(item, 'branch_current')
             elif action == subcircuit_act:
                 self._create_subcircuit_from_selection()
+            elif manage_ports_act is not None and action == manage_ports_act:
+                sub_name = item.component.params.get("subcircuit_name", "")
+                self._manage_subcircuit_ports(sub_name)
         else:
             # 右击空白处 — 检查是否右击了引脚
             pin_info = self.get_pin_at(scene_pos)
@@ -2286,6 +2292,151 @@ class CircuitCanvas(QGraphicsView):
             return
 
         # 刷新画布
+        self._refresh_view()
+
+    def _manage_subcircuit_ports(self, sub_name: str):
+        """Edit electrical ports for a subcircuit definition."""
+        from PySide6.QtWidgets import (
+            QAbstractItemView,
+            QComboBox,
+            QDialog,
+            QDialogButtonBox,
+            QHeaderView,
+            QMessageBox,
+            QSpinBox,
+            QTableWidget,
+            QTableWidgetItem,
+            QVBoxLayout,
+        )
+
+        subdef = self.model.subcircuit_defs.get(sub_name)
+        if subdef is None:
+            QMessageBox.warning(
+                self,
+                "Subcircuit Ports",
+                f"Subcircuit definition not found: {sub_name}",
+            )
+            return
+
+        side_order = {"left": 0, "right": 1, "top": 2, "bottom": 3}
+        ports = sorted(
+            subdef.ports,
+            key=lambda p: (side_order.get(p.side, 99), p.order, p.port_name),
+        )
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Manage Ports - {sub_name}")
+        dialog.resize(720, 360)
+        layout = QVBoxLayout(dialog)
+
+        table = QTableWidget(len(ports), 6, dialog)
+        table.setHorizontalHeaderLabels([
+            "Name",
+            "Side",
+            "Order",
+            "Description",
+            "Internal Component",
+            "Internal Pin",
+        ])
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setAlternatingRowColors(True)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+
+        original_rows = []
+        for row, port in enumerate(ports):
+            original_rows.append({
+                "name": port.port_name,
+                "side": port.side,
+                "order": int(port.order),
+                "description": port.description,
+            })
+
+            table.setItem(row, 0, QTableWidgetItem(port.port_name))
+
+            side_combo = QComboBox(table)
+            side_combo.addItems(["left", "right", "top", "bottom"])
+            if port.side in side_order:
+                side_combo.setCurrentText(port.side)
+            table.setCellWidget(row, 1, side_combo)
+
+            order_spin = QSpinBox(table)
+            order_spin.setRange(-9999, 9999)
+            order_spin.setValue(int(port.order))
+            table.setCellWidget(row, 2, order_spin)
+
+            table.setItem(row, 3, QTableWidgetItem(port.description))
+
+            comp_item = QTableWidgetItem(port.internal_comp_id)
+            comp_item.setFlags(comp_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            table.setItem(row, 4, comp_item)
+
+            pin_item = QTableWidgetItem(port.internal_pin_name)
+            pin_item.setFlags(pin_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            table.setItem(row, 5, pin_item)
+
+        layout.addWidget(table)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        rows = []
+        names = []
+        for row, original in enumerate(original_rows):
+            name_item = table.item(row, 0)
+            desc_item = table.item(row, 3)
+            new_name = (name_item.text() if name_item else "").strip()
+            if not new_name:
+                QMessageBox.warning(self, "Subcircuit Ports", "Port names cannot be empty.")
+                return
+            names.append(new_name)
+            rows.append({
+                "old_name": original["name"],
+                "old_side": original["side"],
+                "old_order": original["order"],
+                "old_description": original["description"],
+                "new_name": new_name,
+                "side": table.cellWidget(row, 1).currentText(),
+                "order": table.cellWidget(row, 2).value(),
+                "description": desc_item.text() if desc_item else "",
+            })
+
+        if len(names) != len(set(names)):
+            QMessageBox.warning(self, "Subcircuit Ports", "Port names must be unique.")
+            return
+
+        try:
+            for row in rows:
+                current_name = row["old_name"]
+                if row["new_name"] != current_name:
+                    self.model.rename_subcircuit_port(sub_name, current_name, row["new_name"])
+                    current_name = row["new_name"]
+                if row["side"] != row["old_side"]:
+                    self.model.update_subcircuit_port_side(sub_name, current_name, row["side"])
+                if row["order"] != row["old_order"]:
+                    self.model.update_subcircuit_port_order(sub_name, current_name, row["order"])
+                if row["description"] != row["old_description"]:
+                    self.model.update_subcircuit_port_description(
+                        sub_name,
+                        current_name,
+                        row["description"],
+                    )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Subcircuit Ports", str(exc))
+            return
+
         self._refresh_view()
 
     def keyPressEvent(self, event):
@@ -2464,7 +2615,8 @@ class CircuitCanvas(QGraphicsView):
             self._refresh_wires()
             self.canvas_changed.emit()
         elif event in ["component_added", "component_removed", "component_rotated",
-                      "params_updated", "undone", "redone", "cleared"]:
+                      "params_updated", "subcircuit_ports_updated",
+                      "undone", "redone", "cleared"]:
             self._refresh_view()
         elif event in ["wire_added", "wire_removed"]:
             self._refresh_wires()
