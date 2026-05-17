@@ -378,6 +378,133 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual(len(model.components), 2)
 
+    def test_canvas_paste_translates_wire_waypoints(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            r1 = ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=100,
+                y=100,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            r2 = ComponentInstance(
+                comp_id="R_002",
+                comp_type=ComponentType.RESISTOR,
+                name="R2",
+                x=300,
+                y=100,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            model.add_component(r1)
+            model.add_component(r2)
+            model.add_wire(
+                Wire(
+                    "W_ORIG",
+                    "R_001",
+                    "nt",
+                    "R_002",
+                    "nf",
+                    waypoints=[(200, 100), (200, 200), (300, 200)],
+                )
+            )
+
+            canvas.component_items["R_001"].setSelected(True)
+            canvas.component_items["R_002"].setSelected(True)
+            canvas._copy_selected()
+            canvas._paste_clipboard(QPointF(700, 400))
+
+            pasted_wires = [
+                wire for wire_id, wire in model.wires.items()
+                if wire_id != "W_ORIG"
+            ]
+            self.assertEqual(len(pasted_wires), 1)
+            self.assertEqual(
+                pasted_wires[0].waypoints,
+                [(700.0, 400.0), (700.0, 500.0), (800.0, 500.0)],
+            )
+        finally:
+            canvas.close()
+
+    def test_canvas_paste_selects_new_component_group(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            for comp_id, name, x in [
+                ("R_001", "R1", 100),
+                ("R_002", "R2", 300),
+            ]:
+                model.add_component(
+                    ComponentInstance(
+                        comp_id=comp_id,
+                        comp_type=ComponentType.RESISTOR,
+                        name=name,
+                        x=x,
+                        y=100,
+                        pins=create_component_pins(ComponentType.RESISTOR),
+                    )
+                )
+
+            canvas.component_items["R_001"].setSelected(True)
+            canvas.component_items["R_002"].setSelected(True)
+            canvas._copy_selected()
+            canvas._paste_clipboard(QPointF(700, 400))
+
+            selected_ids = {
+                item.component.comp_id
+                for item in canvas.scene.selectedItems()
+                if hasattr(item, "component")
+            }
+            self.assertEqual(len(selected_ids), 2)
+            self.assertFalse({"R_001", "R_002"} & selected_ids)
+        finally:
+            canvas.close()
+
+    def test_ctrl_v_pastes_component_group_at_last_mouse_scene_position(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            for comp_id, name, x in [
+                ("R_001", "R1", 100),
+                ("R_002", "R2", 300),
+            ]:
+                model.add_component(
+                    ComponentInstance(
+                        comp_id=comp_id,
+                        comp_type=ComponentType.RESISTOR,
+                        name=name,
+                        x=x,
+                        y=100,
+                        pins=create_component_pins(ComponentType.RESISTOR),
+                    )
+                )
+
+            canvas.component_items["R_001"].setSelected(True)
+            canvas.component_items["R_002"].setSelected(True)
+            canvas._copy_selected()
+            canvas._last_mouse_scene_pos = QPointF(700, 400)
+
+            event = QKeyEvent(
+                QEvent.Type.KeyPress,
+                Qt.Key.Key_V,
+                Qt.KeyboardModifier.ControlModifier,
+            )
+            canvas.keyPressEvent(event)
+
+            new_positions = sorted(
+                (comp.x, comp.y)
+                for comp_id, comp in model.components.items()
+                if comp_id not in {"R_001", "R_002"}
+            )
+            self.assertEqual(new_positions, [(600, 400), (800, 400)])
+        finally:
+            canvas.close()
+
     def test_canvas_click_selection_replaces_unless_ctrl_is_held(self):
         app = get_app()
         model = CircuitModel()

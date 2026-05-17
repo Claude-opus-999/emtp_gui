@@ -997,6 +997,7 @@ class CircuitCanvas(QGraphicsView):
         self._temp_wire_node: Optional[QGraphicsEllipseItem] = None
         self._middle_panning = False
         self._middle_pan_last_pos: Optional[QPoint] = None
+        self._last_mouse_scene_pos: Optional[QPointF] = None
         self._component_drag_selected_ids: set = set()
         self._component_drag_start_positions: Dict[str, Tuple[int, int]] = {}
         self._component_drag_wire_snapshot: Dict[str, Dict[str, object]] = {}
@@ -1122,6 +1123,14 @@ class CircuitCanvas(QGraphicsView):
                     best = (item, pin_name)
         return best
 
+    def _keyboard_paste_position(self) -> QPointF:
+        if self._last_mouse_scene_pos is not None:
+            return QPointF(self._last_mouse_scene_pos)
+        return self.mapToScene(
+            self.viewport().width() // 2,
+            self.viewport().height() // 2,
+        )
+
     def _apply_component_selection(self, item: ComponentGraphicsItem, additive: bool = False):
         """按 GUI 选择规则更新元件选择状态。"""
         if additive:
@@ -1132,6 +1141,19 @@ class CircuitCanvas(QGraphicsView):
                     selected.setSelected(False)
             item.setSelected(True)
         self.model.select_component(item.component.comp_id)
+
+    def _select_component_ids(self, comp_ids: List[str]):
+        target_ids = set(comp_ids)
+        for item in self.scene.selectedItems():
+            item.setSelected(False)
+        for comp_id in target_ids:
+            item = self.component_items.get(comp_id)
+            if item is not None:
+                item.setSelected(True)
+        if self._active_subcircuit_def() is None:
+            self.model.select_components(list(target_ids))
+        else:
+            self.canvas_changed.emit()
 
     def mouseDoubleClickEvent(self, event):
         """双击 — 进入子电路编辑模式"""
@@ -1614,6 +1636,8 @@ class CircuitCanvas(QGraphicsView):
 
     def mousePressEvent(self, event):
         """鼠标按下"""
+        scene_pos = self.mapToScene(event.pos())
+        self._last_mouse_scene_pos = QPointF(scene_pos)
         if event.button() == Qt.MouseButton.MiddleButton:
             self._middle_panning = True
             self._middle_pan_last_pos = event.pos()
@@ -1622,13 +1646,11 @@ class CircuitCanvas(QGraphicsView):
             return
 
         if self.mode == CanvasMode.WIRE and event.button() == Qt.MouseButton.RightButton:
-            self._handle_wire_right_click(self.mapToScene(event.pos()))
+            self._handle_wire_right_click(scene_pos)
             event.accept()
             return
 
         if event.button() == Qt.LeftButton:
-            scene_pos = self.mapToScene(event.pos())
-
             if self.mode == CanvasMode.PLACE:
                 pos = self.snap_to_grid(scene_pos)
                 self._place_component(pos)
@@ -1653,6 +1675,8 @@ class CircuitCanvas(QGraphicsView):
 
     def mouseMoveEvent(self, event):
         """鼠标移动 - 拖拽式连线时更新临时线"""
+        scene_pos = self.mapToScene(event.pos())
+        self._last_mouse_scene_pos = QPointF(scene_pos)
         if self._middle_panning and self._middle_pan_last_pos is not None:
             delta = event.pos() - self._middle_pan_last_pos
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - delta.x())
@@ -1662,7 +1686,6 @@ class CircuitCanvas(QGraphicsView):
             return
 
         if self.mode == CanvasMode.WIRE and self._is_drawing_wire() and self._temp_line:
-            scene_pos = self.mapToScene(event.pos())
             self._update_temp_wire(scene_pos)
             event.accept()
             return
@@ -2304,6 +2327,7 @@ class CircuitCanvas(QGraphicsView):
         """右键菜单"""
         from PySide6.QtWidgets import QMenu
         scene_pos = self.mapToScene(event.pos())
+        self._last_mouse_scene_pos = QPointF(scene_pos)
         if self.mode == CanvasMode.WIRE:
             event.accept()
             return
@@ -2843,12 +2867,7 @@ class CircuitCanvas(QGraphicsView):
         elif event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_C:
             self._copy_selected()
         elif event.modifiers() == Qt.ControlModifier and event.key() == Qt.Key_V:
-            # 粘贴到画布中心
-            center = self.mapToScene(
-                self.viewport().width() // 2,
-                self.viewport().height() // 2,
-            )
-            self._paste_clipboard(center)
+            self._paste_clipboard(self._keyboard_paste_position())
         else:
             super().keyPressEvent(event)
 
@@ -2935,6 +2954,18 @@ class CircuitCanvas(QGraphicsView):
             'wires': clipboard_wires,
         }
 
+    @staticmethod
+    def _translate_waypoints(waypoints, dx: float, dy: float):
+        translated = []
+        for point in waypoints or []:
+            if hasattr(point, "x") and hasattr(point, "y"):
+                translated.append((float(point.x()) + dx, float(point.y()) + dy))
+                continue
+            if len(point) < 2:
+                continue
+            translated.append((float(point[0]) + dx, float(point[1]) + dy))
+        return translated
+
     def _paste_clipboard(self, pos: QPointF):
         """从剪贴板粘贴元件（及连线）"""
         if not self._clipboard:
@@ -2953,25 +2984,25 @@ class CircuitCanvas(QGraphicsView):
         orig_ys = [c.y for c in clipboard_comps.values()]
         center_x = sum(orig_xs) / len(orig_xs)
         center_y = sum(orig_ys) / len(orig_ys)
+        paste_dx = int(pos.x() - center_x)
+        paste_dy = int(pos.y() - center_y)
 
         # Bug7 修复：使用 _active_components() 计算名称
         active_comps = self._active_components()
 
         # 建立 old_comp_id → new_comp_id 映射，用于重映射连线
         id_remap: Dict[str, str] = {}
+        pasted_ids: List[str] = []
 
         for old_cid, comp in clipboard_comps.items():
             new_id = self.model.generate_component_id(comp.comp_type)
             id_remap[old_cid] = new_id
+            pasted_ids.append(new_id)
 
             # 名称根据当前活动容器计算（含已粘贴的新元件）
             count = len([c for c in active_comps.values()
                          if c.comp_type == comp.comp_type]) + 1
             new_name = f"{comp.comp_type.value}{count}"
-
-            # Bug5：相对于原中心的偏移 + 粘贴点
-            rel_x = comp.x - center_x
-            rel_y = comp.y - center_y
 
             # Bug6 修复：使用 copy.deepcopy 处理嵌套 params
             new_pins = []
@@ -2985,8 +3016,8 @@ class CircuitCanvas(QGraphicsView):
                 comp_id=new_id,
                 comp_type=comp.comp_type,
                 name=new_name,
-                x=int(pos.x() + rel_x),
-                y=int(pos.y() + rel_y),
+                x=comp.x + paste_dx,
+                y=comp.y + paste_dy,
                 rotation=comp.rotation,
                 params=copy.deepcopy(comp.params),
                 pins=new_pins,
@@ -3005,9 +3036,16 @@ class CircuitCanvas(QGraphicsView):
                     from_pin=wire.from_pin,
                     to_comp=new_to,
                     to_pin=wire.to_pin,
-                    waypoints=copy.deepcopy(wire.waypoints),
+                    waypoints=self._translate_waypoints(
+                        wire.waypoints,
+                        paste_dx,
+                        paste_dy,
+                    ),
                 )
                 self._add_wire_to_active_design(new_wire)
+        self._refresh_view()
+        self._select_component_ids(pasted_ids)
+        self.canvas_changed.emit()
 
     def _on_model_changed(self, event: str = "changed"):
         """模型变化时重绘"""
