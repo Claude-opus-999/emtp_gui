@@ -8,6 +8,12 @@ from typing import Optional, Callable, Dict, List, Any, Tuple
 from enum import Enum
 import uuid
 
+PIN_GRID_SIZE = 5
+
+
+def _snap_pin_coord(value: float) -> float:
+    return round(float(value) / PIN_GRID_SIZE) * PIN_GRID_SIZE
+
 
 class ComponentType(Enum):
     """元件类型枚举"""
@@ -55,8 +61,8 @@ class Pin:
     def from_dict(cls, data: Dict) -> 'Pin':
         return cls(
             name=data.get('name', ''),
-            local_x=data.get('local_x', 0),
-            local_y=data.get('local_y', 0),
+            local_x=_snap_pin_coord(data.get('local_x', 0)),
+            local_y=_snap_pin_coord(data.get('local_y', 0)),
             node_id=data.get('node_id'),
             display_name=data.get('display_name'),
         )
@@ -506,6 +512,18 @@ class CircuitModel:
     """电路数据模型 - 所有 UI 操作最终都映射为对此模型的增删改查"""
 
     CURRENT_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
+    COMPACT_SYMBOL_PIN_TYPES = frozenset({
+        ComponentType.RESISTOR,
+        ComponentType.INDUCTOR,
+        ComponentType.CAPACITOR,
+        ComponentType.SERIES_RL,
+        ComponentType.SWITCH,
+        ComponentType.VOLTAGE_SOURCE,
+        ComponentType.CURRENT_SOURCE,
+        ComponentType.MOA,
+        ComponentType.LPM,
+        ComponentType.GROUND,
+    })
 
     def __init__(self):
         self.components: Dict[str, ComponentInstance] = {}
@@ -659,6 +677,30 @@ class CircuitModel:
         for subdef in self.subcircuit_defs.values():
             for wire in subdef.wires.values():
                 yield wire
+
+    def _normalize_compact_symbol_pins(self):
+        from .component_lib import create_component_pins
+
+        for comp in self.iter_all_components():
+            if comp.comp_type not in self.COMPACT_SYMBOL_PIN_TYPES:
+                continue
+            template_pins = create_component_pins(
+                comp.comp_type,
+                params=comp.params,
+            )
+            existing_by_name = {pin.name: pin for pin in comp.pins}
+            if set(existing_by_name) != {pin.name for pin in template_pins}:
+                continue
+            comp.pins = [
+                Pin(
+                    name=pin.name,
+                    local_x=pin.local_x,
+                    local_y=pin.local_y,
+                    node_id=existing_by_name[pin.name].node_id,
+                    display_name=existing_by_name[pin.name].display_name,
+                )
+                for pin in template_pins
+            ]
 
     # ---- Undo/Redo ----
 
@@ -1961,6 +2003,7 @@ class CircuitModel:
             }
 
         model._migrate_subcircuit_ports_to_stable_ids()
+        model._normalize_compact_symbol_pins()
         model._rebuild_id_counters()
         return model
 

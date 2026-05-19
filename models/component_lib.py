@@ -6,16 +6,33 @@ EMTP 电路仿真 GUI - 元件注册表
 from .circuit_model import ComponentType
 from typing import Dict, Any, List
 
+PIN_GRID_SIZE = 5
+
+
+def _snap_pin_coord(value: float) -> float:
+    return round(float(value) / PIN_GRID_SIZE) * PIN_GRID_SIZE
+
+
+def _snap_pin_def(pin_def: Dict[str, Any]) -> Dict[str, Any]:
+    snapped = dict(pin_def)
+    snapped['local_x'] = _snap_pin_coord(snapped.get('local_x', 0))
+    snapped['local_y'] = _snap_pin_coord(snapped.get('local_y', 0))
+    return snapped
+
+
+def _snap_pin_defs(pin_defs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [_snap_pin_def(pin_def) for pin_def in pin_defs]
+
 
 # 元件引脚定义
 PINS = {
     'two_port': [  # 双端口元件: R, L, C, SW, IS
-        {'name': 'nf', 'local_x': -30, 'local_y': 0},
-        {'name': 'nt', 'local_x': 30, 'local_y': 0},
+        {'name': 'nf', 'local_x': -15, 'local_y': 0},
+        {'name': 'nt', 'local_x': 15, 'local_y': 0},
     ],
     'voltage_source': [  # 电压源
-        {'name': 'node_pos', 'local_x': -30, 'local_y': 0},
-        {'name': 'node_neg', 'local_x': 30, 'local_y': 0},
+        {'name': 'node_pos', 'local_x': -15, 'local_y': 0},
+        {'name': 'node_neg', 'local_x': 15, 'local_y': 0},
     ],
     'bergeron': [  # Bergeron传输线
         {'name': 'nk', 'local_x': -30, 'local_y': 0},
@@ -34,7 +51,7 @@ PINS = {
         {'name': 'nm_2', 'local_x': 30, 'local_y': 15},
     ],
     'ground': [  # 接地
-        {'name': 'gnd', 'local_x': 0, 'local_y': -24},
+        {'name': 'gnd', 'local_x': 0, 'local_y': -15},
     ],
     'junction': [
         {'name': 'node', 'local_x': 0, 'local_y': 0},
@@ -43,12 +60,12 @@ PINS = {
         {'name': 'node', 'local_x': 0, 'local_y': 0},
     ],
     'moa': [  # MOA避雷器
-        {'name': 'nf', 'local_x': -30, 'local_y': 0},
-        {'name': 'nt', 'local_x': 30, 'local_y': 0},
+        {'name': 'nf', 'local_x': -15, 'local_y': 0},
+        {'name': 'nt', 'local_x': 15, 'local_y': 0},
     ],
     'lpm': [  # LPM绝缘子
-        {'name': 'nf', 'local_x': -30, 'local_y': 0},
-        {'name': 'nt', 'local_x': 30, 'local_y': 0},
+        {'name': 'nf', 'local_x': -15, 'local_y': 0},
+        {'name': 'nt', 'local_x': 15, 'local_y': 0},
     ],
     'umec': [  # UMEC变压器（两绕组三相组）
         {'name': 'H_A', 'local_x': -30, 'local_y': -15},
@@ -856,11 +873,11 @@ def create_component_pins(
 ) -> List:
     """从模板创建元件引脚"""
     from .circuit_model import Pin
-    pin_defs = get_pins(comp_type, n_phases, probe_type=probe_type, params=params)
+    pin_defs = _snap_pin_defs(get_pins(comp_type, n_phases, probe_type=probe_type, params=params))
     return [Pin(name=p['name'], local_x=p['local_x'], local_y=p['local_y']) for p in pin_defs]
 
 def create_component(comp_type: ComponentType, n_phases: int = 1):
     """创建元件参数字典（含引脚）"""
     return {
-        'pins': get_pins(comp_type, n_phases),
+        'pins': _snap_pin_defs(get_pins(comp_type, n_phases)),
     }

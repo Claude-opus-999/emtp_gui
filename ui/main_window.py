@@ -127,13 +127,39 @@ class ScientificSpinBox(QDoubleSpinBox):
 
     _ACCEPTABLE_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
     _INTERMEDIATE_RE = re.compile(r"^[+-]?(?:(?:\d+(?:\.\d*)?|\.\d*)?(?:[eE][+-]?\d*)?)?$")
+    _NUMBER_WITH_UNIT_RE = re.compile(
+        r"^\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)"
+        r"\s*(?:\[([^\]]+)\]|([A-Za-zΩΩμµ]+))?\s*$"
+    )
+    _NUMBER_WITH_PARTIAL_UNIT_RE = re.compile(
+        r"^\s*[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+        r"\s*(?:\[?[A-Za-zΩΩμµ]*)?$"
+    )
+    _PREFIX_FACTORS = {
+        "": 1.0,
+        "f": 1e-15,
+        "p": 1e-12,
+        "n": 1e-9,
+        "u": 1e-6,
+        "m": 1e-3,
+        "c": 1e-2,
+        "k": 1e3,
+        "K": 1e3,
+        "M": 1e6,
+        "G": 1e9,
+        "T": 1e12,
+    }
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setRange(1e-15, 1e6)
-        self.setDecimals(12)
+        self.setDecimals(18)
         self.setMinimumWidth(130)
         self.setKeyboardTracking(False)
+        self._base_unit = ""
+
+    def set_base_unit(self, unit: str):
+        self._base_unit = self._normalize_unit(unit or "")
 
     def textFromValue(self, val: float) -> str:
         if val == 0:
@@ -144,18 +170,55 @@ class ScientificSpinBox(QDoubleSpinBox):
 
     def valueFromText(self, text: str) -> float:
         try:
-            return float(text.replace(',', ''))
+            return self._parse_value(text)
         except ValueError:
             return self.value()
 
+    @classmethod
+    def _normalize_unit(cls, unit: str) -> str:
+        normalized = (unit or "").strip().replace(" ", "")
+        normalized = normalized.replace("μ", "u").replace("µ", "u").replace("Ω", "Ω")
+        if normalized.lower().endswith("ohm"):
+            normalized = f"{normalized[:-3]}Ω"
+        return normalized
+
+    def _unit_multiplier(self, unit: str) -> float:
+        normalized = self._normalize_unit(unit)
+        if not normalized:
+            return 1.0
+        if not self._base_unit:
+            raise ValueError("Unit suffix is not supported for this field")
+        if normalized == self._base_unit:
+            return 1.0
+        if not normalized.endswith(self._base_unit):
+            raise ValueError(f"Unit {unit!r} does not match base unit {self._base_unit!r}")
+
+        prefix = normalized[:-len(self._base_unit)]
+        if prefix not in self._PREFIX_FACTORS:
+            raise ValueError(f"Unsupported SI prefix: {prefix}")
+        return self._PREFIX_FACTORS[prefix]
+
+    def _parse_value(self, text: str) -> float:
+        candidate = text.strip().replace(",", "")
+        match = self._NUMBER_WITH_UNIT_RE.fullmatch(candidate)
+        if not match:
+            raise ValueError(text)
+        unit = match.group(2) or match.group(3) or ""
+        return float(match.group(1)) * self._unit_multiplier(unit)
+
     def validate(self, text: str, pos: int):
         candidate = text.strip().replace(',', '')
-        if self._ACCEPTABLE_RE.fullmatch(candidate):
-            value = float(candidate)
+        try:
+            value = self._parse_value(candidate)
             if self.minimum() <= value <= self.maximum():
                 return (QValidator.State.Acceptable, text, pos)
             return (QValidator.State.Intermediate, text, pos)
+        except ValueError:
+            pass
+
         if self._INTERMEDIATE_RE.fullmatch(candidate):
+            return (QValidator.State.Intermediate, text, pos)
+        if self._NUMBER_WITH_PARTIAL_UNIT_RE.fullmatch(candidate):
             return (QValidator.State.Intermediate, text, pos)
         return (QValidator.State.Invalid, text, pos)
 
@@ -895,6 +958,7 @@ class PropertyPanel(QWidget):
 
         if param_spec.get('type') == 'float' or param_spec.get('scientific'):
             spin = ScientificSpinBox()
+            spin.set_base_unit(param_spec.get('unit', ''))
             spin.setRange(param_spec.get('min', -1e30), param_spec.get('max', 1e30))
             if current_val is not None:
                 spin.setValue(float(current_val))
@@ -1391,6 +1455,11 @@ class CodePreviewPanel(QWidget):
 class PlotPanel(QWidget):
     """波形显示面板"""
 
+    CURVE_LINE_WIDTH = 0.9
+    LEGEND_FONT_SIZE = 6
+    MAX_MARKER_SIZE = 22
+    MAX_LABEL_FONT_SIZE = 7
+
     def __init__(self, model: CircuitModel = None):
         super().__init__()
         self.model = model
@@ -1673,13 +1742,77 @@ class PlotPanel(QWidget):
             probes_to_show = {k: v for k, v in self._probe_data.items() if k == selected}
 
         for name, (data, label, ls) in probes_to_show.items():
-            self.ax.plot(t, data, label=label, linestyle=ls)
+            line, = self.ax.plot(
+                t,
+                data,
+                label=label,
+                linestyle=ls,
+                linewidth=self.CURVE_LINE_WIDTH,
+            )
+            self._mark_series_maximum(t, data, unit, line.get_color())
 
         self.ax.set_xlabel(f'Time ({unit})')
         self.ax.set_ylabel('Voltage (kV) / Current (A)')
-        self.ax.legend(fontsize=8, loc='best')
+        self.ax.legend(
+            fontsize=self.LEGEND_FONT_SIZE,
+            loc='upper right',
+            framealpha=0.75,
+            borderpad=0.3,
+            labelspacing=0.25,
+            handlelength=1.5,
+        )
         self.ax.grid(True, alpha=0.3)
         self.mpl_canvas.draw()
+
+    def _mark_series_maximum(self, time_data, value_data, unit: str, color):
+        """Mark the maximum visible sample and annotate its time."""
+        try:
+            import numpy as np
+
+            times = np.asarray(time_data, dtype=float)
+            values = np.asarray(value_data, dtype=float)
+            count = min(len(times), len(values))
+            if count == 0:
+                return
+
+            times = times[:count]
+            values = values[:count]
+            finite = np.isfinite(times) & np.isfinite(values)
+            if not np.any(finite):
+                return
+
+            finite_indices = np.nonzero(finite)[0]
+            max_index = finite_indices[int(np.argmax(values[finite]))]
+            max_time = float(times[max_index])
+            max_value = float(values[max_index])
+        except Exception:
+            return
+
+        self.ax.scatter(
+            [max_time],
+            [max_value],
+            s=self.MAX_MARKER_SIZE,
+            color=color,
+            edgecolors='white',
+            linewidths=0.6,
+            zorder=4,
+            label='_nolegend_',
+        )
+        self.ax.annotate(
+            f"max={max_value:.4g}\nt={max_time:.4g} {unit}",
+            xy=(max_time, max_value),
+            xytext=(6, 6),
+            textcoords='offset points',
+            fontsize=self.MAX_LABEL_FONT_SIZE,
+            color=color,
+            bbox={
+                'boxstyle': 'round,pad=0.2',
+                'facecolor': 'white',
+                'edgecolor': color,
+                'alpha': 0.75,
+                'linewidth': 0.6,
+            },
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2118,11 +2251,12 @@ class MainWindow(QMainWindow):
 
             self.current_file = file_path
             self.setWindowTitle(f"EMTP Circuit Designer - {file_path}")
+            validation = self.model.validate_all_subcircuits()
             if validation.has_errors:
                 QMessageBox.warning(
                     self,
                     "Subcircuit Validation",
-                    "当前工程存在子电路错误，文件已保存，但可能无法仿真。",
+                    "当前工程存在子电路错误，文件已加载，但可能无法仿真。",
                 )
             self.status_label.setText(f"已加载: {file_path}")
 

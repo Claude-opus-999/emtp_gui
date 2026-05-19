@@ -6,7 +6,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
-from models.circuit_model import CircuitModel, ComponentInstance, ComponentType
+from models.circuit_model import CircuitModel, ComponentInstance, ComponentType, Pin
 from models.component_lib import create_component_pins, get_default_params
 from ui.circuit_canvas import ComponentGraphicsItem
 from ui.symbols.line_symbols import (
@@ -63,6 +63,99 @@ def has_ink_in_rect(image, left, top, right, bottom):
 
 
 class SymbolRenderingTests(unittest.TestCase):
+    def test_compact_electrical_symbols_use_half_size_pin_footprint(self):
+        compact_two_pin_types = (
+            ComponentType.RESISTOR,
+            ComponentType.INDUCTOR,
+            ComponentType.CAPACITOR,
+            ComponentType.SERIES_RL,
+            ComponentType.SWITCH,
+            ComponentType.VOLTAGE_SOURCE,
+            ComponentType.CURRENT_SOURCE,
+            ComponentType.MOA,
+            ComponentType.LPM,
+        )
+
+        for comp_type in compact_two_pin_types:
+            comp = ComponentInstance(
+                comp_id=f"{comp_type.value}_001",
+                comp_type=comp_type,
+                name=comp_type.value,
+                x=0,
+                y=0,
+                params=get_default_params(comp_type),
+                pins=create_component_pins(comp_type),
+            )
+
+            self.assertEqual(
+                max(abs(pin.local_x) for pin in comp.pins),
+                15,
+                comp_type,
+            )
+            self.assertTrue(
+                all(pin.local_y == 0 for pin in comp.pins),
+                comp_type,
+            )
+            self.assertLessEqual(
+                ComponentGraphicsItem(comp, CircuitModel()).boundingRect().width(),
+                50,
+                comp_type,
+            )
+
+    def test_compact_ground_and_junction_symbols_use_smaller_footprints(self):
+        ground = ComponentInstance(
+            comp_id="GND_001",
+            comp_type=ComponentType.GROUND,
+            name="GND",
+            x=0,
+            y=0,
+            params=get_default_params(ComponentType.GROUND),
+            pins=create_component_pins(ComponentType.GROUND),
+        )
+        junction = ComponentInstance(
+            comp_id="JUNC_001",
+            comp_type=ComponentType.JUNCTION,
+            name="JUNC",
+            x=0,
+            y=0,
+            params=get_default_params(ComponentType.JUNCTION),
+            pins=create_component_pins(ComponentType.JUNCTION),
+        )
+
+        self.assertEqual(ground.pins[0].local_y, -15)
+        self.assertLessEqual(
+            ComponentGraphicsItem(ground, CircuitModel()).boundingRect().height(),
+            42,
+        )
+        self.assertLessEqual(
+            ComponentGraphicsItem(junction, CircuitModel()).boundingRect().width(),
+            10,
+        )
+
+    def test_loading_current_project_compacts_saved_primitive_pin_offsets(self):
+        saved = CircuitModel().to_dict()
+        saved["components"] = {
+            "R_001": ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=0,
+                y=0,
+                pins=[
+                    Pin("nf", -30, 0, 11),
+                    Pin("nt", 30, 0, 12),
+                ],
+            ).to_dict()
+        }
+
+        loaded = CircuitModel.from_dict(saved)
+        pins = {pin.name: pin for pin in loaded.components["R_001"].pins}
+
+        self.assertEqual(pins["nf"].local_x, -15)
+        self.assertEqual(pins["nt"].local_x, 15)
+        self.assertEqual(pins["nf"].node_id, 11)
+        self.assertEqual(pins["nt"].node_id, 12)
+
     def test_core_primitive_symbols_render_distinct_shapes(self):
         signatures = {}
         for comp_type in (
@@ -183,8 +276,8 @@ class SymbolRenderingTests(unittest.TestCase):
         image = render_component(comp)
 
         self.assertGreater(non_white_pixels(image), 60)
-        self.assertTrue(has_ink_in_rect(image, 118, 62, 122, 82))
-        self.assertTrue(has_ink_in_rect(image, 102, 83, 138, 88))
+        self.assertTrue(has_ink_in_rect(image, 118, 70, 122, 84))
+        self.assertTrue(has_ink_in_rect(image, 108, 83, 132, 88))
 
     def test_lcp_line_symbols_render_as_labeled_model_blocks(self):
         cases = {

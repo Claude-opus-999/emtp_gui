@@ -40,6 +40,101 @@ class _PreviewDebounceMixin:
         self._preview_timer.start()
 
 
+class _LCPFittingMixin:
+    """Shared VF fitting page for LCP overhead lines and cables."""
+
+    def _build_fitting_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        yc_group = QGroupBox("Yc (特性导纳) 拟合")
+        yc_form = QFormLayout(yc_group)
+        self.yc_poles_min_spin = QSpinBox()
+        self.yc_poles_min_spin.setRange(2, 50)
+        self.yc_poles_min_spin.setValue(6)
+        yc_form.addRow("最小极点数:", self.yc_poles_min_spin)
+
+        self.yc_poles_max_spin = QSpinBox()
+        self.yc_poles_max_spin.setRange(2, 50)
+        self.yc_poles_max_spin.setValue(20)
+        yc_form.addRow("最大极点数:", self.yc_poles_max_spin)
+
+        self.yc_error_spin = QDoubleSpinBox()
+        self.yc_error_spin.setRange(0.0001, 1.0)
+        self.yc_error_spin.setDecimals(4)
+        self.yc_error_spin.setValue(0.002)
+        yc_form.addRow("目标误差:", self.yc_error_spin)
+        layout.addWidget(yc_group)
+
+        h_group = QGroupBox("H (传播函数) 拟合")
+        h_form = QFormLayout(h_group)
+        self.h_poles_min_spin = QSpinBox()
+        self.h_poles_min_spin.setRange(2, 50)
+        self.h_poles_min_spin.setValue(8)
+        h_form.addRow("最小极点数:", self.h_poles_min_spin)
+
+        self.h_poles_max_spin = QSpinBox()
+        self.h_poles_max_spin.setRange(2, 50)
+        self.h_poles_max_spin.setValue(20)
+        h_form.addRow("最大极点数:", self.h_poles_max_spin)
+
+        self.h_error_spin = QDoubleSpinBox()
+        self.h_error_spin.setRange(0.0001, 1.0)
+        self.h_error_spin.setDecimals(4)
+        self.h_error_spin.setValue(0.002)
+        h_form.addRow("目标误差:", self.h_error_spin)
+        layout.addWidget(h_group)
+
+        freq_group = QGroupBox("频率扫描范围")
+        freq_form = QFormLayout(freq_group)
+        self.freq_min_spin = QDoubleSpinBox()
+        self.freq_min_spin.setRange(1e-6, 1e6)
+        self.freq_min_spin.setDecimals(4)
+        self.freq_min_spin.setValue(0.01)
+        self.freq_min_spin.setSuffix(" Hz")
+        freq_form.addRow("起始频率:", self.freq_min_spin)
+
+        self.freq_max_spin = QDoubleSpinBox()
+        self.freq_max_spin.setRange(1, 1e9)
+        self.freq_max_spin.setDecimals(0)
+        self.freq_max_spin.setValue(100000)
+        self.freq_max_spin.setSuffix(" Hz")
+        freq_form.addRow("终止频率:", self.freq_max_spin)
+
+        self.freq_n_spin = QSpinBox()
+        self.freq_n_spin.setRange(10, 10000)
+        self.freq_n_spin.setValue(200)
+        freq_form.addRow("频率增量数:", self.freq_n_spin)
+        layout.addWidget(freq_group)
+
+        layout.addStretch()
+        return widget
+
+    def _load_fitting_from_params(self, params: dict):
+        self.yc_poles_min_spin.setValue(params.get('Yc_poles_min', 6))
+        self.yc_poles_max_spin.setValue(params.get('Yc_poles_max', 20))
+        self.yc_error_spin.setValue(params.get('Yc_target_error', 0.002))
+        self.h_poles_min_spin.setValue(params.get('H_poles_min', 8))
+        self.h_poles_max_spin.setValue(params.get('H_poles_max', 20))
+        self.h_error_spin.setValue(params.get('H_target_error', 0.002))
+        self.freq_min_spin.setValue(params.get('freq_min', 0.01))
+        self.freq_max_spin.setValue(params.get('freq_max', 100000))
+        self.freq_n_spin.setValue(params.get('n_freq_increments', 200))
+
+    def _fitting_config(self) -> Dict:
+        return {
+            'Yc_poles_min': self.yc_poles_min_spin.value(),
+            'Yc_poles_max': self.yc_poles_max_spin.value(),
+            'Yc_target_error': self.yc_error_spin.value(),
+            'H_poles_min': self.h_poles_min_spin.value(),
+            'H_poles_max': self.h_poles_max_spin.value(),
+            'H_target_error': self.h_error_spin.value(),
+            'freq_min': self.freq_min_spin.value(),
+            'freq_max': self.freq_max_spin.value(),
+            'n_freq_increments': self.freq_n_spin.value(),
+        }
+
+
 # ================================================================
 #  LCPOHLDialog — 架空线
 # ================================================================
@@ -696,7 +791,7 @@ class LCPOHLDialog(QDialog, _PreviewDebounceMixin):
 #  LCPSingleCableDialog — 单芯电缆
 # ================================================================
 
-class LCPSingleCableDialog(QDialog, _PreviewDebounceMixin):
+class LCPSingleCableDialog(QDialog, _PreviewDebounceMixin, _LCPFittingMixin):
     """LCP 单芯电缆参数对话框
 
     支持多根电缆的动态配置，每根电缆包含芯线/护套/铠装参数。
@@ -721,6 +816,7 @@ class LCPSingleCableDialog(QDialog, _PreviewDebounceMixin):
         layout.addWidget(self.tabs)
 
         self.tabs.addTab(self._build_params_tab(), "参数配置")
+        self.tabs.addTab(self._build_fitting_tab(), "拟合配置")
         self.tabs.addTab(self._build_preview_tab(), "截面预览")
 
         # ====== 按钮 ======
@@ -850,7 +946,7 @@ class LCPSingleCableDialog(QDialog, _PreviewDebounceMixin):
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
     def _on_tab_changed(self, index: int):
-        if index == 1:  # 截面预览选项卡
+        if index == 2:  # 截面预览选项卡
             self._refresh_previews()
 
     # ================================================================
@@ -959,6 +1055,7 @@ class LCPSingleCableDialog(QDialog, _PreviewDebounceMixin):
         self._preview_timer.blockSignals(True)
         self.soil_rho_spin.setValue(params.get('soil_resistivity', 100.0))
         self.soil_eps_spin.setValue(params.get('soil_permittivity', 10.0))
+        self._load_fitting_from_params(params)
         self._preview_timer.blockSignals(False)
 
     def get_config(self) -> dict:
@@ -984,7 +1081,7 @@ class LCPSingleCableDialog(QDialog, _PreviewDebounceMixin):
             except (ValueError, AttributeError):
                 pass
 
-        return {
+        config = {
             'n_cables': self.n_cables_spin.value(),
             'length': self.length_spin.value(),
             'soil_resistivity': self.soil_rho_spin.value(),
@@ -992,13 +1089,15 @@ class LCPSingleCableDialog(QDialog, _PreviewDebounceMixin):
             'force_rebuild': self.force_rebuild_check.isChecked(),
             'cables': cables,
         }
+        config.update(self._fitting_config())
+        return config
 
 
 # ================================================================
 #  LCPThreeCoreCableDialog — 三芯电缆
 # ================================================================
 
-class LCPThreeCoreCableDialog(QDialog, _PreviewDebounceMixin):
+class LCPThreeCoreCableDialog(QDialog, _PreviewDebounceMixin, _LCPFittingMixin):
     """LCP 三芯电缆参数对话框
 
     管道内三芯结构，导体按角度排列。
@@ -1023,6 +1122,7 @@ class LCPThreeCoreCableDialog(QDialog, _PreviewDebounceMixin):
         layout.addWidget(self.tabs)
 
         self.tabs.addTab(self._build_params_tab(), "参数配置")
+        self.tabs.addTab(self._build_fitting_tab(), "拟合配置")
         self.tabs.addTab(self._build_preview_tab(), "截面预览")
 
         # ====== 按钮 ======
@@ -1224,7 +1324,7 @@ class LCPThreeCoreCableDialog(QDialog, _PreviewDebounceMixin):
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
     def _on_tab_changed(self, index: int):
-        if index == 1:  # 截面预览选项卡
+        if index == 2:  # 截面预览选项卡
             self._refresh_previews()
 
     # ================================================================
@@ -1296,6 +1396,7 @@ class LCPThreeCoreCableDialog(QDialog, _PreviewDebounceMixin):
         self.soil_rho_spin.setValue(params.get('soil_resistivity', 100.0))
         self.soil_eps_spin.setValue(params.get('soil_permittivity', 10.0))
         self.burial_depth_spin.setValue(params.get('burial_depth', 1.0))
+        self._load_fitting_from_params(params)
         self._preview_timer.blockSignals(False)
 
     # ================================================================
@@ -1309,7 +1410,7 @@ class LCPThreeCoreCableDialog(QDialog, _PreviewDebounceMixin):
         except ValueError:
             angles = [270.0, 30.0, 150.0]
 
-        return {
+        config = {
             'length': self.length_spin.value(),
             'force_rebuild': self.force_rebuild_check.isChecked(),
             'pipe_inner_radius': self.pipe_inner_radius_spin.value(),
@@ -1328,3 +1429,5 @@ class LCPThreeCoreCableDialog(QDialog, _PreviewDebounceMixin):
             'soil_permittivity': self.soil_eps_spin.value(),
             'burial_depth': self.burial_depth_spin.value(),
         }
+        config.update(self._fitting_config())
+        return config

@@ -3,7 +3,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QImage, QKeyEvent, QPainter, QPainterPath, QValidator
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QGraphicsItem, QPushButton, QToolBar
@@ -169,6 +169,44 @@ class RegressionTests(unittest.TestCase):
             app.processEvents()
 
             self.assertAlmostEqual(model.components["R_001"].params["R"], 4.256e-3)
+        finally:
+            panel.close()
+            canvas.close()
+            app.processEvents()
+
+    def test_property_float_editor_accepts_bracketed_si_unit_suffix(self):
+        app = get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        panel = main_window_module.PropertyPanel(model, canvas)
+        try:
+            capacitor = ComponentInstance(
+                comp_id="C_001",
+                comp_type=ComponentType.CAPACITOR,
+                name="C1",
+                x=0,
+                y=0,
+                params={"C": 1e-6},
+                pins=create_component_pins(ComponentType.CAPACITOR),
+            )
+            model.add_component(capacitor)
+            panel._show_component(capacitor)
+            spin = dict(panel._param_spin_widgets)["C"]
+
+            text = "0.00001889814 [uF]"
+            state, _, _ = spin.validate(text, len(text))
+
+            self.assertEqual(state, QValidator.State.Acceptable)
+            spin.lineEdit().selectAll()
+            QTest.keyClicks(spin.lineEdit(), text)
+            spin.interpretText()
+            app.processEvents()
+
+            self.assertAlmostEqual(
+                model.components["C_001"].params["C"],
+                1.889814e-11,
+                places=18,
+            )
         finally:
             panel.close()
             canvas.close()
@@ -649,7 +687,7 @@ class RegressionTests(unittest.TestCase):
 
         self.assertEqual(len(pins), 1)
         self.assertEqual(pins[0].name, "gnd")
-        self.assertLessEqual(pins[0].local_y, -20)
+        self.assertLessEqual(pins[0].local_y, -15)
 
     def test_canvas_scene_is_large_and_middle_drag_pans(self):
         app = get_app()
@@ -708,10 +746,11 @@ class RegressionTests(unittest.TestCase):
 
             start = canvas.component_items["R_001"].get_all_scene_pin_positions()["nt"]
             end = canvas.component_items["R_002"].get_all_scene_pin_positions()["nf"]
+            end_x = float(end.x())
 
             canvas._handle_wire_left_click(start)
             canvas._handle_wire_left_click(QPointF(-50, -40))
-            canvas._handle_wire_left_click(QPointF(70, -45))
+            canvas._handle_wire_left_click(QPointF(end_x, -45))
             canvas._handle_wire_right_click(end)
 
             wires = list(model.wires.values())
@@ -722,7 +761,7 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(wires[0].to_pin, "nf")
             self.assertEqual(
                 wires[0].waypoints,
-                [(-50.0, 0.0), (-50.0, -40.0), (70.0, -40.0)],
+                [(-50.0, 0.0), (-50.0, -40.0), (end_x, -40.0)],
             )
             points = [start, *[QPointF(x, y) for x, y in wires[0].waypoints], end]
             for first, second in zip(points, points[1:]):
@@ -950,6 +989,56 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(CircuitCanvas.GRID_SIZE, 5)
         self.assertEqual(CircuitCanvas.GRID_VISUAL_SIZE, 5)
 
+    def test_canvas_background_draws_dot_grid_not_line_grid(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            image = QImage(24, 24, QImage.Format.Format_ARGB32)
+            image.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(image)
+            canvas.drawBackground(painter, QRectF(0, 0, 24, 24))
+            painter.end()
+
+            background = QColor("#f8fafc")
+            self.assertNotEqual(image.pixelColor(10, 10), background)
+            self.assertEqual(image.pixelColor(10, 12), background)
+            self.assertEqual(image.pixelColor(12, 10), background)
+        finally:
+            canvas.close()
+
+    def test_component_library_pins_are_aligned_to_canvas_grid_points(self):
+        grid = CircuitCanvas.GRID_SIZE
+        cases = [
+            (ComponentType.RESISTOR, 1, None),
+            (ComponentType.GROUND, 1, None),
+            (ComponentType.PROBE, 1, {"probe_type": "voltage_between"}),
+            (ComponentType.ULM, 4, None),
+            (ComponentType.LCP_OHL, 4, {"n_phases": 3, "n_gw": 1}),
+            (ComponentType.LCP_SINGLE_CABLE, 2, {"n_cables": 2}),
+            (ComponentType.LCP_THREE_CABLE, 3, None),
+            (ComponentType.UMEC_TRANSFORMER, 3, {"wtype1": "Y_gnd", "wtype2": "Y"}),
+        ]
+
+        for comp_type, pin_count, params in cases:
+            with self.subTest(comp_type=comp_type):
+                probe_type = (params or {}).get("probe_type")
+                pins = create_component_pins(
+                    comp_type,
+                    pin_count,
+                    probe_type=probe_type,
+                    params=params,
+                )
+                for pin in pins:
+                    self.assertEqual(float(pin.local_x) % grid, 0.0)
+                    self.assertEqual(float(pin.local_y) % grid, 0.0)
+
+    def test_loaded_pin_coordinates_are_aligned_to_canvas_grid_points(self):
+        pin = Pin.from_dict({"name": "legacy", "local_x": 72, "local_y": -24})
+
+        self.assertEqual(pin.local_x, 70)
+        self.assertEqual(pin.local_y, -25)
+
     def test_wire_right_click_on_empty_space_finishes_at_preview_junction(self):
         get_app()
         model = CircuitModel()
@@ -1018,7 +1107,7 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(len(wires), 1)
             self.assertEqual(wires[0].to_comp, "R_002")
             self.assertEqual(wires[0].to_pin, "nf")
-            self.assertEqual(wires[0].waypoints, [(70.0, 0.0)])
+            self.assertEqual(wires[0].waypoints, [(float(end.x()), float(start.y()))])
             self.assertIsNone(canvas._wiring_start)
             self.assertIsNone(canvas._temp_line)
             self.assertEqual(canvas.mode, CanvasMode.WIRE)
@@ -1053,7 +1142,7 @@ class RegressionTests(unittest.TestCase):
         finally:
             canvas.close()
 
-    def test_wire_waypoints_are_selectable_and_box_selectable(self):
+    def test_wire_waypoints_appear_after_wire_is_selected(self):
         get_app()
         model = CircuitModel()
         canvas = CircuitCanvas(model)
@@ -1083,8 +1172,10 @@ class RegressionTests(unittest.TestCase):
             handle = waypoint_items[("W_ROUTE", 0)]
             self.assertTrue(handle.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsSelectable)
             self.assertTrue(handle.flags() & QGraphicsItem.GraphicsItemFlag.ItemIsMovable)
-            self.assertLessEqual(handle.boundingRect().width(), 6)
-            self.assertLessEqual(handle.boundingRect().height(), 6)
+            self.assertFalse(handle.isVisible())
+
+            canvas.wire_items["W_ROUTE"].setSelected(True)
+            self.assertTrue(handle.isVisible())
 
             image = QImage(20, 20, QImage.Format.Format_ARGB32)
             image.fill(Qt.GlobalColor.transparent)
@@ -1092,14 +1183,48 @@ class RegressionTests(unittest.TestCase):
             painter.translate(10, 10)
             handle.paint(painter, None)
             painter.end()
-            self.assertEqual(image.pixelColor(10, 10).alpha(), 0)
+            self.assertGreater(image.pixelColor(10, 10).alpha(), 0)
+        finally:
+            canvas.close()
 
-            canvas.scene.clearSelection()
-            path = QPainterPath()
-            path.addRect(handle.sceneBoundingRect().adjusted(-1, -1, 1, 1))
-            canvas.scene.setSelectionArea(path)
+    def test_single_wire_waypoint_drag_can_move_and_stays_orthogonal(self):
+        get_app()
+        model = CircuitModel()
+        canvas = CircuitCanvas(model)
+        try:
+            r1 = ComponentInstance(
+                comp_id="R_001",
+                comp_type=ComponentType.RESISTOR,
+                name="R1",
+                x=-100,
+                y=0,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            r2 = ComponentInstance(
+                comp_id="R_002",
+                comp_type=ComponentType.RESISTOR,
+                name="R2",
+                x=100,
+                y=60,
+                pins=create_component_pins(ComponentType.RESISTOR),
+            )
+            model.add_component(r1)
+            model.add_component(r2)
+            model.add_wire(Wire("W_ROUTE", "R_001", "nt", "R_002", "nf", [(70.0, 0.0)]))
 
-            self.assertTrue(handle.isSelected())
+            handle = getattr(canvas, "wire_waypoint_items", {})[("W_ROUTE", 0)]
+            canvas.wire_items["W_ROUTE"].setSelected(True)
+            handle.setPos(QPointF(20, 25))
+
+            self.assertEqual(model.wires["W_ROUTE"].waypoints, [(20.0, 25.0)])
+            self.assertEqual(handle.pos(), QPointF(20, 25))
+            points = canvas.wire_items["W_ROUTE"]._manhattan_points()
+            self.assertIn(QPointF(20, 25), points)
+            for first, second in zip(points, points[1:]):
+                self.assertTrue(
+                    abs(first.x() - second.x()) < 0.1
+                    or abs(first.y() - second.y()) < 0.1
+                )
         finally:
             canvas.close()
 
@@ -1160,13 +1285,17 @@ class RegressionTests(unittest.TestCase):
             )
             model.add_component(r1)
             model.add_component(r2)
-            model.add_wire(Wire("W_ROUTE", "R_001", "nt", "R_002", "nf", [(-70.0, -40.0), (70.0, -40.0)]))
+            start = canvas.component_items["R_001"].get_all_scene_pin_positions()["nt"]
+            end = canvas.component_items["R_002"].get_all_scene_pin_positions()["nf"]
+            start_x = float(start.x())
+            end_x = float(end.x())
+            model.add_wire(Wire("W_ROUTE", "R_001", "nt", "R_002", "nf", [(start_x, -40.0), (end_x, -40.0)]))
 
             handle = getattr(canvas, "wire_waypoint_items", {})[("W_ROUTE", 0)]
-            handle.setPos(QPointF(-70, -65))
+            handle.setPos(QPointF(start_x, -65))
 
-            self.assertEqual(model.wires["W_ROUTE"].waypoints, [(-70.0, -65.0), (70.0, -65.0)])
-            self.assertEqual(getattr(canvas, "wire_waypoint_items", {})[("W_ROUTE", 1)].pos(), QPointF(70, -65))
+            self.assertEqual(model.wires["W_ROUTE"].waypoints, [(start_x, -65.0), (end_x, -65.0)])
+            self.assertEqual(getattr(canvas, "wire_waypoint_items", {})[("W_ROUTE", 1)].pos(), QPointF(end_x, -65))
             points = canvas.wire_items["W_ROUTE"]._manhattan_points()
             for first, second in zip(points, points[1:]):
                 self.assertTrue(
@@ -1201,21 +1330,27 @@ class RegressionTests(unittest.TestCase):
             )
             model.add_component(r1)
             model.add_component(r2)
-            model.add_wire(Wire("W_ROUTE", "R_001", "nt", "R_002", "nf", [(-70.0, -40.0), (70.0, -40.0)]))
+            start_pin = canvas.component_items["R_001"].get_all_scene_pin_positions()["nt"]
+            end_pin = canvas.component_items["R_002"].get_all_scene_pin_positions()["nf"]
+            start_x = float(start_pin.x())
+            end_x = float(end_pin.x())
+            model.add_wire(Wire("W_ROUTE", "R_001", "nt", "R_002", "nf", [(start_x, -40.0), (end_x, -40.0)]))
             canvas.centerOn(0, 0)
             app.processEvents()
 
+            canvas.wire_items["W_ROUTE"].setSelected(True)
+            app.processEvents()
             handle = getattr(canvas, "wire_waypoint_items", {})[("W_ROUTE", 0)]
             start = canvas.mapFromScene(handle.scenePos())
-            end = canvas.mapFromScene(QPointF(-70, -65))
+            end = canvas.mapFromScene(QPointF(start_x, -65))
             QTest.mousePress(canvas.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
             QTest.mouseMove(canvas.viewport(), end)
             QTest.mouseRelease(canvas.viewport(), Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, end)
             app.processEvents()
 
-            self.assertEqual(model.wires["W_ROUTE"].waypoints, [(-70.0, -65.0), (70.0, -65.0)])
+            self.assertEqual(model.wires["W_ROUTE"].waypoints, [(start_x, -65.0), (end_x, -65.0)])
             self.assertTrue(model.undo())
-            self.assertEqual(model.wires["W_ROUTE"].waypoints, [(-70.0, -40.0), (70.0, -40.0)])
+            self.assertEqual(model.wires["W_ROUTE"].waypoints, [(start_x, -40.0), (end_x, -40.0)])
         finally:
             canvas.close()
             app.processEvents()
@@ -1287,6 +1422,8 @@ class RegressionTests(unittest.TestCase):
             )
             model.add_component(r1)
             model.add_component(r2)
+            end_pin = canvas.component_items["R_002"].get_all_scene_pin_positions()["nf"]
+            end_x = float(end_pin.x())
             model.add_wire(
                 Wire(
                     "W_ROUTE",
@@ -1294,7 +1431,7 @@ class RegressionTests(unittest.TestCase):
                     "nt",
                     "R_002",
                     "nf",
-                    [(-20.0, 0.0), (-20.0, -40.0), (70.0, -40.0)],
+                    [(-20.0, 0.0), (-20.0, -40.0), (end_x, -40.0)],
                 )
             )
 
@@ -1307,7 +1444,7 @@ class RegressionTests(unittest.TestCase):
 
             self.assertEqual(
                 model.wires["W_ROUTE"].waypoints,
-                [(-20.0, 40.0), (-20.0, -40.0), (70.0, -40.0)],
+                [(-20.0, 40.0), (-20.0, -40.0), (end_x, -40.0)],
             )
         finally:
             canvas.close()

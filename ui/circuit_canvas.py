@@ -27,6 +27,19 @@ from models.component_lib import COMPONENT_REGISTRY, get_pins
 from ui.symbols import draw_component_symbol
 
 
+COMPACT_ELECTRICAL_TYPES = {
+    ComponentType.RESISTOR,
+    ComponentType.INDUCTOR,
+    ComponentType.CAPACITOR,
+    ComponentType.SERIES_RL,
+    ComponentType.SWITCH,
+    ComponentType.VOLTAGE_SOURCE,
+    ComponentType.CURRENT_SOURCE,
+    ComponentType.MOA,
+    ComponentType.LPM,
+}
+
+
 class CanvasMode(Enum):
     """画布交互模式"""
     SELECT = auto()   # 选择/移动模式
@@ -80,9 +93,13 @@ class ComponentGraphicsItem(QGraphicsItem):
         elif component.comp_type == ComponentType.PROBE:
             self._bounding_rect = QRectF(-45, -45, 90, 100)
         elif component.comp_type == ComponentType.JUNCTION:
-            self._bounding_rect = QRectF(-8, -8, 16, 16)
+            self._bounding_rect = QRectF(-5, -5, 10, 10)
         elif component.comp_type == ComponentType.SUBCIRCUIT_PORT:
             self._bounding_rect = QRectF(-24, -14, 48, 44)
+        elif component.comp_type == ComponentType.GROUND:
+            self._bounding_rect = QRectF(-18, -20, 36, 42)
+        elif component.comp_type in COMPACT_ELECTRICAL_TYPES:
+            self._bounding_rect = QRectF(-25, -18, 50, 42)
         elif component.comp_type in (
             ComponentType.BERGERON,
             ComponentType.ULM,
@@ -163,9 +180,13 @@ class ComponentGraphicsItem(QGraphicsItem):
             ComponentType.SUBCIRCUIT_PORT,
         ):
             painter.setPen(QColor("#1e2a3a"))
-            font = QFont("Arial", 9)
+            compact_label = ct == ComponentType.GROUND or ct in COMPACT_ELECTRICAL_TYPES
+            font = QFont("Arial", 8 if compact_label else 9)
             painter.setFont(font)
-            painter.drawText(QPointF(-15, 35), self.component.name)
+            painter.drawText(
+                QPointF(-12, 25) if compact_label else QPointF(-15, 35),
+                self.component.name,
+            )
 
         # 绘制引脚
         if ct not in (ComponentType.JUNCTION, ComponentType.SUBCIRCUIT_PORT):
@@ -179,9 +200,20 @@ class ComponentGraphicsItem(QGraphicsItem):
     def _draw_pins(self, painter: QPainter):
         """绘制引脚端子（paint() 坐标系已被 Qt 自动旋转，直接用本地坐标）"""
         painter.setBrush(QBrush(QColor("#2563eb")))
+        radius = 2 if (
+            self.component.comp_type == ComponentType.GROUND
+            or self.component.comp_type in COMPACT_ELECTRICAL_TYPES
+        ) else 3
         for pin in self.component.pins:
             painter.setPen(QPen(QColor("#2563eb"), 2))
-            painter.drawEllipse(pin.local_x - 3, pin.local_y - 3, 6, 6)
+            painter.drawEllipse(
+                QRectF(
+                    pin.local_x - radius,
+                    pin.local_y - radius,
+                    radius * 2,
+                    radius * 2,
+                )
+            )
 
     def _draw_resistor(self, painter: QPainter):
         """绘制电阻符号"""
@@ -861,6 +893,8 @@ class WireGraphicsItem(QGraphicsItem):
 class WireWaypointGraphicsItem(QGraphicsItem):
     """Interactive handle for a wire waypoint."""
 
+    HANDLE_SIZE = 8.0
+
     def __init__(self, canvas: 'CircuitCanvas', wire: Wire, waypoint_index: int):
         super().__init__()
         self.canvas = canvas
@@ -872,11 +906,14 @@ class WireWaypointGraphicsItem(QGraphicsItem):
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.ItemIsMovable, True)
         self.setFlag(QGraphicsItem.ItemSendsGeometryChanges, True)
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
         self.setZValue(12)
+        self.setVisible(False)
         self.sync_from_model()
 
     def boundingRect(self) -> QRectF:
-        return QRectF(-3, -3, 6, 6)
+        half = self.HANDLE_SIZE / 2.0
+        return QRectF(-half, -half, self.HANDLE_SIZE, self.HANDLE_SIZE)
 
     def shape(self) -> QPainterPath:
         path = QPainterPath()
@@ -884,7 +921,17 @@ class WireWaypointGraphicsItem(QGraphicsItem):
         return path
 
     def paint(self, painter: QPainter, option, widget=None):
-        return
+        wire_item = self.canvas.wire_items.get(self.wire.wire_id)
+        wire_selected = wire_item is not None and isValid(wire_item) and wire_item.isSelected()
+        if not wire_selected and not self.isSelected():
+            return
+
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = self.boundingRect().adjusted(0.75, 0.75, -0.75, -0.75)
+        outline = QColor("#f59e0b") if wire_selected or self.isSelected() else QColor("#2563eb")
+        painter.setPen(QPen(outline, 1.5))
+        painter.setBrush(QBrush(QColor("#ffffff")))
+        painter.drawEllipse(rect)
 
     def sync_from_model(self):
         if self.waypoint_index >= len(self.wire.waypoints):
@@ -978,6 +1025,7 @@ class CircuitCanvas(QGraphicsView):
         self.model = model
         self.scene = QGraphicsScene(self)
         self.setScene(self.scene)
+        self.scene.selectionChanged.connect(self._update_wire_waypoint_visibility)
 
         self.setRenderHint(QPainter.Antialiasing)
         self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
@@ -1027,22 +1075,25 @@ class CircuitCanvas(QGraphicsView):
         self.setSceneRect(-3000, -3000, 6000, 6000)
 
     def drawBackground(self, painter: QPainter, rect: QRectF):
-        """绘制网格背景（在场景背景层，不会遮挡任何图形项）"""
+        """绘制点阵背景（在场景背景层，不会遮挡任何图形项）。"""
         painter.fillRect(rect, QColor("#f8fafc"))
         if not self.show_grid:
             return
-        minor_pen = QPen(QColor("#edf2f7"), 0.25)
-        major_pen = QPen(QColor("#dbe3ec"), 0.45)
 
         visual = self.GRID_VISUAL_SIZE
         left = int(rect.left()) - (int(rect.left()) % visual)
         top = int(rect.top()) - (int(rect.top()) % visual)
+        minor_pen = QPen(QColor("#cbd5e1"), 1)
+        major_pen = QPen(QColor("#94a3b8"), 1)
+
         for x in range(left, int(rect.right()) + 1, visual):
-            painter.setPen(major_pen if x % self.GRID_MAJOR_SIZE == 0 else minor_pen)
-            painter.drawLine(x, int(rect.top()), x, int(rect.bottom()))
-        for y in range(top, int(rect.bottom()) + 1, visual):
-            painter.setPen(major_pen if y % self.GRID_MAJOR_SIZE == 0 else minor_pen)
-            painter.drawLine(int(rect.left()), y, int(rect.right()), y)
+            for y in range(top, int(rect.bottom()) + 1, visual):
+                painter.setPen(
+                    major_pen
+                    if x % self.GRID_MAJOR_SIZE == 0 and y % self.GRID_MAJOR_SIZE == 0
+                    else minor_pen
+                )
+                painter.drawPoint(x, y)
 
     def _draw_grid(self):
         """不再使用 — 网格已改由 drawBackground 绘制"""
@@ -1154,6 +1205,23 @@ class CircuitCanvas(QGraphicsView):
             self.model.select_components(list(target_ids))
         else:
             self.canvas_changed.emit()
+
+    def _update_wire_waypoint_visibility(self):
+        if not hasattr(self, "wire_waypoint_items"):
+            return
+
+        selected_wire_ids = {
+            item.wire.wire_id
+            for item in self.scene.selectedItems()
+            if isinstance(item, WireGraphicsItem)
+        }
+        for (wire_id, _), item in list(self.wire_waypoint_items.items()):
+            if item is None or not isValid(item):
+                continue
+            should_show = wire_id in selected_wire_ids or item.isSelected()
+            if item.isVisible() != should_show:
+                item.setVisible(should_show)
+            item.update()
 
     def mouseDoubleClickEvent(self, event):
         """双击 — 进入子电路编辑模式"""
@@ -1426,6 +1494,7 @@ class CircuitCanvas(QGraphicsView):
             wire_item._update_bounds()
             wire_item.update()
         self._sync_wire_waypoint_items(wire, moving_item)
+        self._update_wire_waypoint_visibility()
         self._refresh_wire_intersections()
         self.canvas_changed.emit()
 
@@ -1453,11 +1522,20 @@ class CircuitCanvas(QGraphicsView):
             (anchor_index + 1, self._segment_orientation(anchors[anchor_index], anchors[anchor_index + 1])),
         ]
 
+        both_neighbors_are_endpoints = (
+            len(waypoints) == 1
+            and neighbor_specs[0][0] == 0
+            and neighbor_specs[1][0] == len(anchors) - 1
+        )
+
         for neighbor_index, orientation in neighbor_specs:
             if orientation is None:
                 continue
             neighbor = anchors[neighbor_index]
-            if neighbor_index == 0 or neighbor_index == len(anchors) - 1:
+            if (
+                not both_neighbors_are_endpoints
+                and (neighbor_index == 0 or neighbor_index == len(anchors) - 1)
+            ):
                 if orientation == "vertical":
                     target.setX(neighbor.x())
                 else:
@@ -3071,6 +3149,7 @@ class CircuitCanvas(QGraphicsView):
             waypoint_item = WireWaypointGraphicsItem(self, wire, index)
             self.scene.addItem(waypoint_item)
             self.wire_waypoint_items[(wire.wire_id, index)] = waypoint_item
+        self._update_wire_waypoint_visibility()
 
     def _clear_wire_intersection_items(self):
         for item in list(self.wire_intersection_items):
